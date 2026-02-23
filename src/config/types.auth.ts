@@ -50,5 +50,10 @@ export type AuthConfig = {
      * errors before escalating to cross-provider model fallback. Default: 1.
      */
     rateLimitedProfileRotations?: number;
+    /**
+     * Max seconds to wait when all auth profiles are rate-limited before
+     * retrying. Set to 0 to disable. Default: 90.
+     */
+    rateLimitWaitSeconds?: number;
   };
 };
