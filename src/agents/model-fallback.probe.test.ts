@@ -5,54 +5,31 @@ import type { OpenClawConfig } from "../config/config.js";
 import type { AuthProfileStore } from "./auth-profiles.js";
 import { makeModelFallbackCfg } from "./test-helpers/model-fallback-config-fixture.js";
 
-// Mock auth-profile submodules — must be before importing model-fallback
-vi.mock("./auth-profiles/store.js", () => ({
+// Mock auth-profiles module — must be before importing model-fallback
+vi.mock("./auth-profiles.js", () => ({
+  clearExpiredCooldowns: vi.fn(),
   ensureAuthProfileStore: vi.fn(),
   loadAuthProfileStoreForRuntime: vi.fn(),
 }));
 
-vi.mock("./auth-profiles/source-check.js", () => ({
-  hasAnyAuthProfileStoreSource: vi.fn(),
-}));
-
-vi.mock("./auth-profiles/usage.js", () => ({
-  getSoonestCooldownExpiry: vi.fn(),
-  isProfileInCooldown: vi.fn(),
-  resolveProfilesUnavailableReason: vi.fn(),
-}));
-
-vi.mock("./auth-profiles/order.js", () => ({
-  resolveAuthProfileOrder: vi.fn(),
-}));
-
-vi.mock("./auth-profiles/source-check.js", () => ({
-  hasAnyAuthProfileStoreSource: vi.fn(() => true),
-}));
-
-type AuthProfilesStoreModule = typeof import("./auth-profiles/store.js");
-type AuthProfilesSourceCheckModule = typeof import("./auth-profiles/source-check.js");
-type AuthProfilesUsageModule = typeof import("./auth-profiles/usage.js");
-type AuthProfilesOrderModule = typeof import("./auth-profiles/order.js");
+type AuthProfilesModule = typeof import("./auth-profiles.js");
 type ModelFallbackModule = typeof import("./model-fallback.js");
 type LoggerModule = typeof import("../logging/logger.js");
 
 let mockedEnsureAuthProfileStore: ReturnType<
-  typeof vi.mocked<AuthProfilesStoreModule["ensureAuthProfileStore"]>
->;
-let mockedHasAnyAuthProfileStoreSource: ReturnType<
-  typeof vi.mocked<AuthProfilesSourceCheckModule["hasAnyAuthProfileStoreSource"]>
+  typeof vi.mocked<AuthProfilesModule["ensureAuthProfileStore"]>
 >;
 let mockedGetSoonestCooldownExpiry: ReturnType<
-  typeof vi.mocked<AuthProfilesUsageModule["getSoonestCooldownExpiry"]>
+  typeof vi.mocked<AuthProfilesModule["getSoonestCooldownExpiry"]>
 >;
 let mockedIsProfileInCooldown: ReturnType<
-  typeof vi.mocked<AuthProfilesUsageModule["isProfileInCooldown"]>
+  typeof vi.mocked<AuthProfilesModule["isProfileInCooldown"]>
 >;
 let mockedResolveProfilesUnavailableReason: ReturnType<
-  typeof vi.mocked<AuthProfilesUsageModule["resolveProfilesUnavailableReason"]>
+  typeof vi.mocked<AuthProfilesModule["resolveProfilesUnavailableReason"]>
 >;
 let mockedResolveAuthProfileOrder: ReturnType<
-  typeof vi.mocked<AuthProfilesOrderModule["resolveAuthProfileOrder"]>
+  typeof vi.mocked<AuthProfilesModule["resolveAuthProfileOrder"]>
 >;
 let runWithModelFallback: ModelFallbackModule["runWithModelFallback"];
 let _probeThrottleInternals: ModelFallbackModule["_probeThrottleInternals"];
@@ -64,22 +41,16 @@ const makeCfg = makeModelFallbackCfg;
 let unregisterLogTransport: (() => void) | undefined;
 
 async function loadModelFallbackProbeModules() {
-  const authProfilesStoreModule = await import("./auth-profiles/store.js");
-  const authProfilesSourceCheckModule = await import("./auth-profiles/source-check.js");
-  const authProfilesUsageModule = await import("./auth-profiles/usage.js");
-  const authProfilesOrderModule = await import("./auth-profiles/order.js");
+  const authProfilesModule = await import("./auth-profiles.js");
   const loggerModule = await import("../logging/logger.js");
   const modelFallbackModule = await import("./model-fallback.js");
-  mockedEnsureAuthProfileStore = vi.mocked(authProfilesStoreModule.ensureAuthProfileStore);
-  mockedHasAnyAuthProfileStoreSource = vi.mocked(
-    authProfilesSourceCheckModule.hasAnyAuthProfileStoreSource,
-  );
-  mockedGetSoonestCooldownExpiry = vi.mocked(authProfilesUsageModule.getSoonestCooldownExpiry);
-  mockedIsProfileInCooldown = vi.mocked(authProfilesUsageModule.isProfileInCooldown);
+  mockedEnsureAuthProfileStore = vi.mocked(authProfilesModule.ensureAuthProfileStore);
+  mockedGetSoonestCooldownExpiry = vi.mocked(authProfilesModule.getSoonestCooldownExpiry);
+  mockedIsProfileInCooldown = vi.mocked(authProfilesModule.isProfileInCooldown);
   mockedResolveProfilesUnavailableReason = vi.mocked(
-    authProfilesUsageModule.resolveProfilesUnavailableReason,
+    authProfilesModule.resolveProfilesUnavailableReason,
   );
-  mockedResolveAuthProfileOrder = vi.mocked(authProfilesOrderModule.resolveAuthProfileOrder);
+  mockedResolveAuthProfileOrder = vi.mocked(authProfilesModule.resolveAuthProfileOrder);
   runWithModelFallback = modelFallbackModule.runWithModelFallback;
   _probeThrottleInternals = modelFallbackModule._probeThrottleInternals;
   registerLogTransport = loggerModule.registerLogTransport;
@@ -199,7 +170,6 @@ describe("runWithModelFallback – probe logic", () => {
       version: 1,
       profiles: {},
     };
-    mockedHasAnyAuthProfileStoreSource.mockReturnValue(true);
     mockedEnsureAuthProfileStore.mockReturnValue(fakeStore);
 
     // Default: resolveAuthProfileOrder returns profiles only for "openai" provider
@@ -566,8 +536,9 @@ describe("runWithModelFallback – probe logic", () => {
       },
     } as Partial<OpenClawConfig>);
 
-    const almostExpired = NOW + 30 * 1000;
-    mockedGetSoonestCooldownExpiry.mockReturnValue(almostExpired);
+    // Cooldown far enough away (> 90s) that the wait-and-retry path does not trigger.
+    const farCooldown = NOW + 120 * 1000;
+    mockedGetSoonestCooldownExpiry.mockReturnValue(farCooldown);
 
     const run = vi.fn().mockResolvedValue("unreachable");
 
