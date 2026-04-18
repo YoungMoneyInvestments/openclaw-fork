@@ -1073,6 +1073,13 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
                 description:
                   "Maximum same-provider auth-profile rotations allowed for rate-limit errors before switching to model fallback (default: 1).",
               },
+              rateLimitWaitSeconds: {
+                type: "number",
+                minimum: 0,
+                title: "Rate Limit Wait (seconds)",
+                description:
+                  "Max seconds to wait when all auth profiles are rate-limited before retrying (default: 90, 0 to disable).",
+              },
             },
             additionalProperties: false,
             title: "Auth Cooldowns",
@@ -25511,6 +25518,11 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
       label: "Rate-Limited Profile Rotations",
       help: "Maximum same-provider auth-profile rotations allowed for rate-limit errors before switching to model fallback (default: 1).",
       tags: ["auth", "access", "performance", "storage"],
+    },
+    "auth.cooldowns.rateLimitWaitSeconds": {
+      label: "Rate Limit Wait (seconds)",
+      help: "Max seconds to wait when all auth profiles are rate-limited before retrying (default: 90, 0 to disable).",
+      tags: ["auth", "access", "performance"],
     },
     "agents.defaults.models": {
       label: "Models",
