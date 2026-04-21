@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import dotenv from "dotenv";
+import { parseEnvValue } from "../secrets/shared.js";
 import { resolveConfigDir } from "../utils.js";
 import { resolveRequiredHomeDir } from "./home-dir.js";
 import {
@@ -113,9 +114,73 @@ type LoadedDotEnvFile = {
   entries: DotEnvEntry[];
 };
 
+function stripTrustedInlineComment(rawValue: string): string {
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let escaped = false;
+  for (let index = 0; index < rawValue.length; index += 1) {
+    const char = rawValue[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (char === "'" && !inDoubleQuote) {
+      inSingleQuote = !inSingleQuote;
+      continue;
+    }
+    if (char === '"' && !inSingleQuote) {
+      inDoubleQuote = !inDoubleQuote;
+      continue;
+    }
+    if (char === "#" && !inSingleQuote && !inDoubleQuote) {
+      const previous = index > 0 ? rawValue[index - 1] : "";
+      if (/\s/.test(previous)) {
+        return rawValue.slice(0, index).trimEnd();
+      }
+    }
+  }
+  return rawValue.trimEnd();
+}
+
+function parseTrustedSingleLineAssignment(line: string): { key: string; value: string } | null {
+  const trimmed = line.trim();
+  if (!trimmed || trimmed.startsWith("#")) {
+    return null;
+  }
+  const withoutExport = trimmed.startsWith("export ") ? trimmed.slice(7).trimStart() : line;
+  const match = withoutExport.match(/^\s*([A-Za-z_][A-Za-z0-9_.-]*)\s*=\s*(.*)$/u);
+  if (!match) {
+    return null;
+  }
+  const [, key, rawValue] = match;
+  const trimmedValue = rawValue.trimStart();
+  const firstChar = trimmedValue[0];
+  if (firstChar === '"' || firstChar === "'") {
+    return null;
+  }
+  return { key, value: parseEnvValue(stripTrustedInlineComment(rawValue)) };
+}
+
+export function parseTrustedDotEnvContent(content: string): Record<string, string> {
+  const parsed = dotenv.parse(content);
+  for (const line of content.split(/\r?\n/u)) {
+    const assignment = parseTrustedSingleLineAssignment(line);
+    if (!assignment) {
+      continue;
+    }
+    parsed[assignment.key] = assignment.value;
+  }
+  return parsed;
+}
+
 function readDotEnvFile(params: {
   filePath: string;
   shouldBlockKey: (key: string) => boolean;
+  parseContent?: (content: string) => Record<string, string>;
   quiet?: boolean;
 }): LoadedDotEnvFile | null {
   let content: string;
@@ -134,7 +199,7 @@ function readDotEnvFile(params: {
 
   let parsed: Record<string, string>;
   try {
-    parsed = dotenv.parse(content);
+    parsed = (params.parseContent ?? dotenv.parse)(content);
   } catch (error) {
     if (!params.quiet) {
       console.warn(`[dotenv] Failed to parse ${params.filePath}: ${String(error)}`);
@@ -156,6 +221,7 @@ export function loadRuntimeDotEnvFile(filePath: string, opts?: { quiet?: boolean
   const parsed = readDotEnvFile({
     filePath,
     shouldBlockKey: shouldBlockRuntimeDotEnvKey,
+    parseContent: parseTrustedDotEnvContent,
     quiet: opts?.quiet ?? true,
   });
   if (!parsed) {
@@ -246,6 +312,7 @@ export function loadGlobalRuntimeDotEnvFiles(opts?: { quiet?: boolean; stateEnvP
     readDotEnvFile({
       filePath: stateEnvPath,
       shouldBlockKey: shouldBlockRuntimeDotEnvKey,
+      parseContent: parseTrustedDotEnvContent,
       quiet,
     }),
   ];
@@ -259,6 +326,7 @@ export function loadGlobalRuntimeDotEnvFiles(opts?: { quiet?: boolean; stateEnvP
           "gateway.env",
         ),
         shouldBlockKey: shouldBlockRuntimeDotEnvKey,
+        parseContent: parseTrustedDotEnvContent,
         quiet,
       }),
     );

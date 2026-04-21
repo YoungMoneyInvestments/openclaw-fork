@@ -97,6 +97,73 @@ describe("loadDotEnv", () => {
     });
   });
 
+  it("preserves literal # in trusted global runtime secrets", async () => {
+    await withIsolatedEnvAndCwd(async () => {
+      await withDotEnvFixture(async ({ cwdDir, stateDir }) => {
+        await writeEnvFile(path.join(stateDir, ".env"), "BLUEBUBBLES_PASSWORD=secret-tail#\n");
+        vi.spyOn(process, "cwd").mockReturnValue(cwdDir);
+        delete process.env.BLUEBUBBLES_PASSWORD;
+
+        loadDotEnv({ quiet: true });
+
+        expect(process.env.BLUEBUBBLES_PASSWORD).toBe("secret-tail#");
+      });
+    });
+  });
+
+  it("strips trusted global inline comments only after whitespace", async () => {
+    await withIsolatedEnvAndCwd(async () => {
+      await withDotEnvFixture(async ({ cwdDir, stateDir }) => {
+        await writeEnvFile(
+          path.join(stateDir, ".env"),
+          [
+            "COMMENTED=value # operator note",
+            "HASHY=literal#fragment",
+            'QUOTED="quoted#value" # note',
+          ].join("\n"),
+        );
+        vi.spyOn(process, "cwd").mockReturnValue(cwdDir);
+        delete process.env.COMMENTED;
+        delete process.env.HASHY;
+        delete process.env.QUOTED;
+
+        loadDotEnv({ quiet: true });
+
+        expect(process.env.COMMENTED).toBe("value");
+        expect(process.env.HASHY).toBe("literal#fragment");
+        expect(process.env.QUOTED).toBe("quoted#value");
+      });
+    });
+  });
+
+  it("preserves multiline quoted trusted global values", async () => {
+    await withIsolatedEnvAndCwd(async () => {
+      await withDotEnvFixture(async ({ cwdDir, stateDir }) => {
+        await writeEnvFile(path.join(stateDir, ".env"), 'MULTILINE="line1\nline2"\n');
+        vi.spyOn(process, "cwd").mockReturnValue(cwdDir);
+        delete process.env.MULTILINE;
+
+        loadDotEnv({ quiet: true });
+
+        expect(process.env.MULTILINE).toBe("line1\nline2");
+      });
+    });
+  });
+
+  it("preserves escaped quoted trusted global values via stock dotenv semantics", async () => {
+    await withIsolatedEnvAndCwd(async () => {
+      await withDotEnvFixture(async ({ cwdDir, stateDir }) => {
+        await writeEnvFile(path.join(stateDir, ".env"), 'ESCAPED="line1\\nline2"\n');
+        vi.spyOn(process, "cwd").mockReturnValue(cwdDir);
+        delete process.env.ESCAPED;
+
+        loadDotEnv({ quiet: true });
+
+        expect(process.env.ESCAPED).toBe("line1\nline2");
+      });
+    });
+  });
+
   it("loads the Ubuntu gateway.env compatibility fallback after ~/.openclaw/.env", async () => {
     await withIsolatedEnvAndCwd(async () => {
       await withDotEnvFixture(async ({ base, cwdDir }) => {

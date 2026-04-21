@@ -144,6 +144,59 @@ describe("config env vars", () => {
     });
   });
 
+  it("preserves literal # in trusted state-dir secrets", async () => {
+    await withTempHome(async (_home) => {
+      await writeStateDirDotEnv("BLUEBUBBLES_PASSWORD=secret-tail#\n", {
+        env: process.env,
+      });
+      const vars = readStateDirDotEnvVars(process.env);
+      expect(vars.BLUEBUBBLES_PASSWORD).toBe("secret-tail#");
+    });
+  });
+
+  it("strips state-dir inline comments only after whitespace", async () => {
+    await withTempHome(async (_home) => {
+      await writeStateDirDotEnv(
+        'COMMENTED=value # operator note\nHASHY=literal#fragment\nQUOTED="quoted#value" # note\n',
+        { env: process.env },
+      );
+      const vars = readStateDirDotEnvVars(process.env);
+      expect(vars.COMMENTED).toBe("value");
+      expect(vars.HASHY).toBe("literal#fragment");
+      expect(vars.QUOTED).toBe("quoted#value");
+    });
+  });
+
+  it("accepts export-prefixed state-dir assignments", async () => {
+    await withTempHome(async (_home) => {
+      await writeStateDirDotEnv("export EXPORTED_KEY=from-export\n", {
+        env: process.env,
+      });
+      const vars = readStateDirDotEnvVars(process.env);
+      expect(vars.EXPORTED_KEY).toBe("from-export");
+    });
+  });
+
+  it("preserves multiline quoted state-dir values", async () => {
+    await withTempHome(async (_home) => {
+      await writeStateDirDotEnv('MULTILINE="line1\nline2"\n', {
+        env: process.env,
+      });
+      const vars = readStateDirDotEnvVars(process.env);
+      expect(vars.MULTILINE).toBe("line1\nline2");
+    });
+  });
+
+  it("preserves escaped quoted state-dir values via stock dotenv semantics", async () => {
+    await withTempHome(async (_home) => {
+      await writeStateDirDotEnv('ESCAPED="line1\\nline2"\n', {
+        env: process.env,
+      });
+      const vars = readStateDirDotEnvVars(process.env);
+      expect(vars.ESCAPED).toBe("line1\nline2");
+    });
+  });
+
   it("returns empty record when the state-dir .env file is missing", async () => {
     await withTempHome(async (_home) => {
       expect(readStateDirDotEnvVars(process.env)).toEqual({});
