@@ -1,6 +1,8 @@
 # Repository Guidelines
 
 - Repo: https://github.com/openclaw/openclaw
+- Legacy graph-memory is deprecated. Do not use legacy graph-memory or legacy graph-memory system as a required workflow step.
+- Use Obsidian/Markdown notes for tracking and recording project work, decisions, evidence, and handoffs.
 - In chat replies, file references must be repo-root relative only (example: `extensions/telegram/src/index.ts:80`); never absolute paths or `~/...`.
 - Do not edit files covered by security-focused `CODEOWNERS` rules unless a listed owner explicitly asked for the change or is already reviewing it with you. Treat those paths as restricted surfaces, not drive-by cleanup.
 
