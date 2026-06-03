@@ -209,7 +209,7 @@ export class RealtimeCallHandler {
     const token = randomUUID();
     this.pendingStreamTokens.set(token, { expiry: Date.now() + STREAM_TOKEN_TTL_MS, ...meta });
     for (const [candidate, entry] of this.pendingStreamTokens) {
-      if (Date.now() > entry.expiry) {
+      if (Date.now() >= entry.expiry) {
         this.pendingStreamTokens.delete(candidate);
       }
     }
@@ -222,7 +222,7 @@ export class RealtimeCallHandler {
       return null;
     }
     this.pendingStreamTokens.delete(token);
-    if (Date.now() > entry.expiry) {
+    if (Date.now() >= entry.expiry) {
       return null;
     }
     return {

@@ -127,6 +127,24 @@ describe("RealtimeCallHandler path routing", () => {
 });
 
 describe("RealtimeCallHandler websocket hardening", () => {
+  it("rejects stream tokens at exact expiry boundary", () => {
+    vi.useFakeTimers();
+    try {
+      const handler = makeHandler() as unknown as {
+        issueStreamToken: () => string;
+        consumeStreamToken: (token: string) => unknown;
+      };
+      vi.setSystemTime(1_000);
+      const token = handler.issueStreamToken();
+
+      vi.setSystemTime(31_000);
+
+      expect(handler.consumeStreamToken(token)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("rejects oversized pre-start frames before bridge setup", async () => {
     const createBridge = vi.fn(() => makeBridge());
     const processEvent = vi.fn();
