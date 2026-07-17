@@ -179,6 +179,21 @@ describe("route-args", () => {
     ).toEqual({
       path: "update.channel",
       json: true,
+      resolve: false,
+    });
+    expect(
+      parseConfigGetRouteArgs([
+        "node",
+        "openclaw",
+        "config",
+        "get",
+        "channels.discord.token",
+        "--resolve",
+      ]),
+    ).toEqual({
+      path: "channels.discord.token",
+      json: false,
+      resolve: true,
     });
     expect(
       parseConfigUnsetRouteArgs([
