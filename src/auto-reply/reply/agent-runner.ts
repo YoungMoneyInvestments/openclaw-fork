@@ -2124,7 +2124,8 @@ export async function runReplyAgent(params: {
       lastCallUsage,
     });
     recordReplyUsageState(runId, replyUsageState);
-    const verboseEnabled = resolvedVerboseLevel !== "off";
+    // Fail closed: unset verbose must not leak operational notices into chat.
+    const verboseEnabled = Boolean(resolvedVerboseLevel && resolvedVerboseLevel !== "off");
     const preserveUserFacingSessionState = shouldPreserveUserFacingSessionStateForInputProvenance(
       followupRun.run.inputProvenance,
     );
@@ -2409,21 +2410,25 @@ export async function runReplyAgent(params: {
           attempts: fallbackAttempts,
         },
       });
-      const fallbackNotice = buildFallbackNotice({
-        selectedProvider,
-        selectedModel,
-        activeProvider: providerUsed,
-        activeModel: modelUsed,
-        attempts: fallbackAttempts,
-        cfg,
-      });
-      if (fallbackNotice) {
-        fallbackNoticePayloads.push(
-          markReplyPayloadForSourceSuppressionDelivery({
-            text: fallbackNotice,
-            isFallbackNotice: true,
-          }),
-        );
+      // Consumer channels (Discord/Telegram) must not see operator failover copy.
+      // Lifecycle events + /status still surface fallback state when verbose is off.
+      if (verboseEnabled) {
+        const fallbackNotice = buildFallbackNotice({
+          selectedProvider,
+          selectedModel,
+          activeProvider: providerUsed,
+          activeModel: modelUsed,
+          attempts: fallbackAttempts,
+          cfg,
+        });
+        if (fallbackNotice) {
+          fallbackNoticePayloads.push(
+            markReplyPayloadForSourceSuppressionDelivery({
+              text: fallbackNotice,
+              isFallbackNotice: true,
+            }),
+          );
+        }
       }
     }
     if (
@@ -2444,16 +2449,18 @@ export async function runReplyAgent(params: {
           previousActiveModel: fallbackTransition.previousState.activeModel,
         },
       });
-      fallbackNoticePayloads.push(
-        markReplyPayloadForSourceSuppressionDelivery({
-          text: buildFallbackClearedNotice({
-            selectedProvider,
-            selectedModel,
-            previousActiveModel: fallbackTransition.previousState.activeModel,
+      if (verboseEnabled) {
+        fallbackNoticePayloads.push(
+          markReplyPayloadForSourceSuppressionDelivery({
+            text: buildFallbackClearedNotice({
+              selectedProvider,
+              selectedModel,
+              previousActiveModel: fallbackTransition.previousState.activeModel,
+            }),
+            isFallbackNotice: true,
           }),
-          isFallbackNotice: true,
-        }),
-      );
+        );
+      }
     }
 
     // Drain any late tool/block deliveries before deciding there's "nothing to send".

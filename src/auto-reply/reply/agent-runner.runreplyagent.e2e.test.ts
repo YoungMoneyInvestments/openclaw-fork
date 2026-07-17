@@ -2905,12 +2905,12 @@ describe("runReplyAgent typing (heartbeat)", () => {
     vi.useRealTimers();
   });
 
-  it("announces model fallback transitions across verbose levels", async () => {
+  it("announces model fallback transitions only when verbose is on", async () => {
     const storeRoot = await mkdtemp(join(tmpdir(), "openclaw-fallback-pin-"));
     const storePath = join(storeRoot, "sessions.json");
     const cases = [
-      { name: "verbose on", verbose: "on" as const },
-      { name: "verbose off", verbose: "off" as const },
+      { name: "verbose on", verbose: "on" as const, expectNotice: true },
+      { name: "verbose off", verbose: "off" as const, expectNotice: false },
     ] as const;
     for (const testCase of cases) {
       const sessionEntry: SessionEntry = {
@@ -2974,8 +2974,13 @@ describe("runReplyAgent typing (heartbeat)", () => {
         ? (res[0] as { text?: string })
         : (res as { text?: string });
       const stored = requireStoredSessionEntry(storePath);
-      expect(payload.text, testCase.name).toContain("Model Fallback:");
-      expect(payload.text, testCase.name).toContain("deepinfra/moonshotai/Kimi-K2.5");
+      if (testCase.expectNotice) {
+        expect(payload.text, testCase.name).toContain("Model Fallback:");
+        expect(payload.text, testCase.name).toContain("deepinfra/moonshotai/Kimi-K2.5");
+      } else {
+        expect(payload.text, testCase.name).not.toContain("Model Fallback:");
+        expect(payload.text, testCase.name).toBe("final");
+      }
       expect(stored.providerOverride, testCase.name).toBe("openai");
       expect(stored.modelOverride, testCase.name).toBe("gpt-5.6-luna");
       expect(stored.modelOverrideSource, testCase.name).toBe("user");
@@ -3487,6 +3492,7 @@ describe("runReplyAgent typing (heartbeat)", () => {
       );
     try {
       const { run } = createMinimalRun({
+        resolvedVerboseLevel: "on",
         blockStreamingEnabled: true,
         opts: { onBlockReply },
         sessionEntry,
@@ -3536,6 +3542,7 @@ describe("runReplyAgent typing (heartbeat)", () => {
       );
     try {
       const { run } = createMinimalRun({
+        resolvedVerboseLevel: "on",
         sessionEntry,
         sessionStore,
         sessionKey: "main",
@@ -3756,6 +3763,7 @@ describe("runReplyAgent typing (heartbeat)", () => {
 
     try {
       const { run } = createMinimalRun({
+        resolvedVerboseLevel: "on",
         runOverrides: {
           provider: "lmstudio",
           model: "gemma-4-e4b-it",
@@ -3808,6 +3816,7 @@ describe("runReplyAgent typing (heartbeat)", () => {
 
     try {
       const { run } = createMinimalRun({
+        resolvedVerboseLevel: "on",
         runOverrides: {
           provider: "lmstudio",
           model: "gemma-4-e4b-it",
@@ -3913,6 +3922,7 @@ describe("runReplyAgent typing (heartbeat)", () => {
 
     try {
       const { run } = createMinimalRun({
+        resolvedVerboseLevel: "on",
         runOverrides: {
           provider: "lmstudio",
           model: "gemma-4-e4b-it",
@@ -3965,6 +3975,7 @@ describe("runReplyAgent typing (heartbeat)", () => {
 
     try {
       const { run } = createMinimalRun({
+        resolvedVerboseLevel: "on",
         runOverrides: {
           provider: "lmstudio",
           model: "gemma-4-e4b-it",
@@ -4017,6 +4028,7 @@ describe("runReplyAgent typing (heartbeat)", () => {
 
     try {
       const { run } = createMinimalRun({
+        resolvedVerboseLevel: "on",
         runOverrides: {
           provider: "lmstudio",
           model: "gemma-4-e4b-it",
@@ -4296,7 +4308,7 @@ describe("runReplyAgent typing (heartbeat)", () => {
     }
   });
 
-  it("announces fallback transitions and emits lifecycle events while verbose is off", async () => {
+  it("emits fallback lifecycle events without chat notices while verbose is off", async () => {
     const sessionEntry: SessionEntry = {
       sessionId: "session",
       updatedAt: Date.now(),
@@ -4366,8 +4378,10 @@ describe("runReplyAgent typing (heartbeat)", () => {
 
       const firstText = Array.isArray(first) ? first[0]?.text : first?.text;
       const secondText = Array.isArray(second) ? second[0]?.text : second?.text;
-      expect(firstText).toContain("Model Fallback:");
-      expect(secondText).toContain("Model Fallback cleared:");
+      expect(firstText).not.toContain("Model Fallback:");
+      expect(firstText).toBe("final");
+      expect(secondText).not.toContain("Model Fallback cleared:");
+      expect(secondText).toBe("final");
       expect(countMatching(phases, (phase) => phase === "fallback")).toBe(1);
       expect(countMatching(phases, (phase) => phase === "fallback_cleared")).toBe(1);
     } finally {
