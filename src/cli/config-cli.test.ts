@@ -1187,6 +1187,48 @@ describe("config cli", () => {
       expect(mockLog).toHaveBeenCalledWith("__OPENCLAW_REDACTED__");
     });
 
+    it("resolves env secret references with --resolve", async () => {
+      const ref = { source: "env", provider: "default", id: "OPENCLAW_TEST_RESOLVE_TOKEN" };
+      const resolved: OpenClawConfig = {
+        channels: { discord: { token: ref } },
+      } as unknown as OpenClawConfig;
+      setSnapshot(resolved, resolved);
+
+      await runConfigCommand(["config", "get", "channels.discord.token", "--resolve"]);
+
+      expect(mockResolveSecretRefValue).toHaveBeenCalledWith(
+        ref,
+        expect.objectContaining({ env: process.env }),
+      );
+      expect(mockLog).toHaveBeenCalledWith("resolved-secret");
+    });
+
+    it("prints plain string values unredacted with --resolve", async () => {
+      const resolved: OpenClawConfig = {
+        gateway: {
+          auth: {
+            token: "super-secret-token",
+          },
+        },
+      };
+      setSnapshot(resolved, resolved);
+
+      await runConfigCommand(["config", "get", "gateway.auth.token", "--resolve"]);
+
+      expect(mockLog).toHaveBeenCalledWith("super-secret-token");
+    });
+
+    it("rejects --resolve on non-secret values", async () => {
+      const resolved: OpenClawConfig = {
+        gateway: { port: 18789 },
+      };
+      setSnapshot(resolved, resolved);
+
+      await expect(
+        runConfigCommand(["config", "get", "gateway.port", "--resolve"]),
+      ).rejects.toThrow("__exit__:1");
+    });
+
     it("prints materialized subagent archive default", async () => {
       const resolved: OpenClawConfig = {};
       const config: OpenClawConfig = {

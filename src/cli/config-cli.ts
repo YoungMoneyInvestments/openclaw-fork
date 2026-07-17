@@ -31,6 +31,7 @@ import { readBestEffortRuntimeConfigSchema } from "../config/runtime-schema.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import {
   coerceSecretRef,
+  isSecretRef,
   isValidEnvSecretRefId,
   resolveSecretInputRef,
   type PluginIntegrationSecretProviderConfig,
@@ -2486,11 +2487,47 @@ export async function runConfigPatch(opts: {
   }
 }
 
-export async function runConfigGet(opts: { path: string; json?: boolean; runtime?: RuntimeEnv }) {
+export async function runConfigGet(opts: {
+  path: string;
+  json?: boolean;
+  resolve?: boolean;
+  runtime?: RuntimeEnv;
+}) {
   const runtime = opts.runtime ?? defaultRuntime;
   try {
     const parsedPath = parseConfigSetPath(opts.path);
     const snapshot = await loadValidConfig(runtime);
+    if (opts.resolve) {
+      // Print the RESOLVED secret for scripts. Out-of-process consumers used
+      // to hand-parse {source:"env",id} reference objects out of the config
+      // file and silently broke when plain-string secrets became refs; this
+      // flag makes the CLI the one resolver. Intentionally unredacted output.
+      const raw = getAtPath(snapshot.config, parsedPath);
+      if (!raw.found) {
+        runtime.error(
+          danger(
+            `Config path not found: ${opts.path}. Run ${formatCliCommand("openclaw config validate")} to inspect config shape.`,
+          ),
+        );
+        runtime.exit(1);
+        return;
+      }
+      if (typeof raw.value === "string") {
+        runtime.log(raw.value);
+        return;
+      }
+      if (isSecretRef(raw.value)) {
+        const resolved = await resolveSecretRefValue(raw.value, {
+          config: snapshot.config,
+          env: process.env,
+        });
+        runtime.log(resolved);
+        return;
+      }
+      runtime.error(danger(`--resolve needs a string or secret-reference value at ${opts.path}.`));
+      runtime.exit(1);
+      return;
+    }
     const redacted = redactConfigObject(snapshot.config);
     const res = getAtPath(redacted, parsedPath);
     if (!res.found) {
@@ -2763,8 +2800,13 @@ export function registerConfigCli(program: Command) {
     .description("Get a config value by dot path")
     .argument("<path>", "Config path (dot or bracket notation)")
     .option("--json", "Output JSON", false)
+    .option(
+      "--resolve",
+      "Resolve a secret reference and print the raw value (unredacted; for scripts)",
+      false,
+    )
     .action(async (path: string, opts) => {
-      await runConfigGet({ path, json: Boolean(opts.json) });
+      await runConfigGet({ path, json: Boolean(opts.json), resolve: Boolean(opts.resolve) });
     });
 
   setCommandJsonMode(cmd.command("set"), "parse-only")

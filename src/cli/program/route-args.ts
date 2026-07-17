@@ -239,7 +239,7 @@ export function parseAgentsListRouteArgs(argv: string[]) {
 export function parseConfigGetRouteArgs(argv: string[]) {
   const path = parseSinglePositional(argv, {
     commandPath: ["config", "get"],
-    booleanFlags: ["--json"],
+    booleanFlags: ["--json", "--resolve"],
   });
   if (!path) {
     return null;
@@ -247,6 +247,7 @@ export function parseConfigGetRouteArgs(argv: string[]) {
   return {
     path,
     json: hasFlag(argv, "--json"),
+    resolve: hasFlag(argv, "--resolve"),
   };
 }
 
