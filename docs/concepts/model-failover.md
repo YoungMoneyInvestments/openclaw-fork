@@ -70,7 +70,7 @@ The value is a TTL in milliseconds. `0` or unset disables the cache. Positive va
 
 ## User-visible fallback notices
 
-When a session moves onto an auto-selected fallback, OpenClaw sends a status notice in the same reply surface:
+When verbose is enabled for the session (`verboseDefault` / session `verboseLevel` is not `off`) and a session moves onto an auto-selected fallback, OpenClaw sends a status notice in the same reply surface:
 
 ```text
 ↪️ Model Fallback: <fallback> (selected <primary>; <reason>)
@@ -82,7 +82,9 @@ When a later probe succeeds and the session returns to the selected primary, Ope
 ↪️ Model Fallback cleared: <primary> (was <fallback>)
 ```
 
-These notices are operational messages, not assistant content. They deliver once per state change, including side-effect-only turns when feasible, but repeated turn-local fallback transitions do not repeat them. Delivery bypasses normal source-reply suppression, does not consume the first assistant reply slot for threaded channels, and is excluded from text-to-speech and commitment extraction.
+With verbose off (the default), fallback still runs and is recorded in logs / lifecycle events / `/status`, but these chat notices are suppressed so consumer channels do not look like the bot is malfunctioning.
+
+These notices are operational messages, not assistant content. When verbose is on, they deliver once per state change, including side-effect-only turns when feasible, but repeated turn-local fallback transitions do not repeat them. Delivery bypasses normal source-reply suppression, does not consume the first assistant reply slot for threaded channels, and is excluded from text-to-speech and commitment extraction.
 
 ## Auth storage (keys + OAuth)
 
