@@ -120,7 +120,10 @@ import {
   loadCliSessionReseedMessages,
   resolveAutoCliSessionReseedHistoryChars,
 } from "./session-history.js";
-import { resolveLoopbackToolsAllowFromMcpPermissions } from "./tool-policy.js";
+import {
+  resolveCliToolSurfaceFromToolsAllow,
+  resolveLoopbackToolsAllowFromMcpPermissions,
+} from "./tool-policy.js";
 import type { CliReusableSession, PreparedCliRunContext, RunCliAgentParams } from "./types.js";
 
 function resolveClaudeCliContextModelId(modelId: string): string {
@@ -318,55 +321,72 @@ function shouldRefreshAuthProfileForExecution(params: {
 
 /** Builds the complete context required to execute a CLI-backed agent run. */
 export async function prepareCliRunContext(
-  params: RunCliAgentParams,
+  paramsInput: RunCliAgentParams,
 ): Promise<PreparedCliRunContext> {
-  const internalParams = params as RunCliAgentPrepareParams;
   const started = Date.now();
-  const executionMode = params.executionMode ?? "agent";
+  const executionMode = paramsInput.executionMode ?? "agent";
   const isSideQuestion = executionMode === "side-question";
   const workspaceResolution = resolveRunWorkspaceDir({
-    workspaceDir: params.workspaceDir,
-    sessionKey: params.sessionKey,
-    agentId: params.agentId,
-    config: params.config,
+    workspaceDir: paramsInput.workspaceDir,
+    sessionKey: paramsInput.sessionKey,
+    agentId: paramsInput.agentId,
+    config: paramsInput.config,
   });
   const resolvedWorkspace = workspaceResolution.workspaceDir;
-  const redactedSessionId = redactRunIdentifier(params.sessionId);
-  const redactedSessionKey = redactRunIdentifier(params.sessionKey);
+  const redactedSessionId = redactRunIdentifier(paramsInput.sessionId);
+  const redactedSessionKey = redactRunIdentifier(paramsInput.sessionKey);
   const redactedWorkspace = redactRunIdentifier(resolvedWorkspace);
   if (workspaceResolution.usedFallback) {
     cliBackendLog.warn(
-      `[workspace-fallback] caller=runCliAgent reason=${workspaceResolution.fallbackReason} run=${params.runId} session=${redactedSessionId} sessionKey=${redactedSessionKey} agent=${workspaceResolution.agentId} workspace=${redactedWorkspace}`,
+      `[workspace-fallback] caller=runCliAgent reason=${workspaceResolution.fallbackReason} run=${paramsInput.runId} session=${redactedSessionId} sessionKey=${redactedSessionKey} agent=${workspaceResolution.agentId} workspace=${redactedWorkspace}`,
     );
   }
   const workspaceDir = resolvedWorkspace;
-  const cwd = params.cwd ? resolveUserPath(params.cwd) : workspaceDir;
+  const cwd = paramsInput.cwd ? resolveUserPath(paramsInput.cwd) : workspaceDir;
   const cwdHash = hashCliSessionText(cwd);
 
-  const backendResolved = resolveCliBackendConfig(params.provider, params.config, {
-    agentId: params.agentId,
+  const backendResolved = resolveCliBackendConfig(paramsInput.provider, paramsInput.config, {
+    agentId: paramsInput.agentId,
   });
   if (!backendResolved) {
-    throw new Error(`Unknown CLI backend: ${params.provider}`);
+    throw new Error(`Unknown CLI backend: ${paramsInput.provider}`);
   }
   const nodeClaudePlacement = resolveNodeClaudePlacement({
     backendId: backendResolved.id,
-    execHost: params.sessionEntry?.execHost,
-    execNode: params.sessionEntry?.execNode,
+    execHost: paramsInput.sessionEntry?.execHost,
+    execNode: paramsInput.sessionEntry?.execNode,
   });
   if (
-    params.cliToolAvailability !== undefined &&
+    paramsInput.cliToolAvailability !== undefined &&
     (backendResolved.nativeToolMode !== "selectable" || !backendResolved.resolveExecutionArgs)
   ) {
     throw new Error(
       `CLI backend ${backendResolved.id} cannot enforce exact per-run tool availability`,
     );
   }
-  if (params.toolsAllow !== undefined) {
+  // A runtime allowlist is enforceable here only as the selectable tool
+  // surface: native tools off, loopback MCP scoped to the named tools by the
+  // grant, which bounds them server-side. An allowlist this backend cannot
+  // express that way fails closed instead of being dropped, which would run
+  // the turn unrestricted.
+  const toolsAllowSurface =
+    paramsInput.toolsAllow !== undefined &&
+    paramsInput.cliToolAvailability === undefined &&
+    backendResolved.nativeToolMode === "selectable" &&
+    backendResolved.resolveExecutionArgs
+      ? resolveCliToolSurfaceFromToolsAllow(paramsInput.toolsAllow)
+      : undefined;
+  if (paramsInput.toolsAllow !== undefined && !toolsAllowSurface) {
     throw new Error(
       `CLI backend ${backendResolved.id} cannot enforce runtime toolsAllow; use an embedded runtime for restricted tool policy`,
     );
   }
+  // Downstream prepare/execute read the translated surface only; the untyped
+  // allowlist must not survive into the prepared params.
+  const params: RunCliAgentParams = toolsAllowSurface
+    ? { ...paramsInput, toolsAllow: undefined, cliToolAvailability: toolsAllowSurface }
+    : paramsInput;
+  const internalParams = params as RunCliAgentPrepareParams;
   const sideQuestionDisablesNativeTools =
     isSideQuestion && backendResolved.sideQuestionToolMode === "disabled";
   const requestedNoNativeTools = params.cliToolAvailability?.native.length === 0;

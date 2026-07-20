@@ -1,9 +1,34 @@
 import { describe, expect, it } from "vitest";
 import {
   resolveCliRuntimeToolsAllow,
+  resolveCliToolSurfaceFromToolsAllow,
   resolveLoopbackToolsAllowFromMcpPermissions,
   stripOpenClawMcpToolPrefix,
 } from "./tool-policy.js";
+
+describe("resolveCliToolSurfaceFromToolsAllow", () => {
+  it("maps named tools to the loopback-only surface", () => {
+    expect(resolveCliToolSurfaceFromToolsAllow(["exec", "read"])).toEqual({
+      native: [],
+      mcp: ["mcp__openclaw__exec", "mcp__openclaw__read"],
+    });
+  });
+
+  it("normalizes and dedupes entries", () => {
+    expect(resolveCliToolSurfaceFromToolsAllow([" Exec ", "exec"])).toEqual({
+      native: [],
+      mcp: ["mcp__openclaw__exec"],
+    });
+  });
+
+  it("fails closed on lists it cannot express as named tools", () => {
+    // Undefined means "cannot express"; callers must reject, never run open.
+    expect(resolveCliToolSurfaceFromToolsAllow([])).toBeUndefined();
+    expect(resolveCliToolSurfaceFromToolsAllow(["*"])).toBeUndefined();
+    expect(resolveCliToolSurfaceFromToolsAllow(["exec", "memory_*"])).toBeUndefined();
+    expect(resolveCliToolSurfaceFromToolsAllow(["exec", "  "])).toBeUndefined();
+  });
+});
 
 describe("resolveLoopbackToolsAllowFromMcpPermissions", () => {
   it("returns undefined when no MCP permission list is set", () => {
