@@ -1226,7 +1226,7 @@ describe("config cli", () => {
 
       await expect(
         runConfigCommand(["config", "get", "gateway.port", "--resolve"]),
-      ).rejects.toThrow("__exit__:1");
+      ).rejects.toThrow("--resolve needs a string or secret-reference value");
     });
 
     it("prints materialized subagent archive default", async () => {
