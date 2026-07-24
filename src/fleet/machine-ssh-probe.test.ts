@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import type { SpawnResult } from "../process/exec.js";
-import type { FleetMachineProbeRequest } from "./machine-inventory.js";
+import type { FleetMachineEndpointProbe } from "./machine-inventory.js";
 import { createFleetMachineSshProbe } from "./machine-ssh-probe.js";
 
-const REQUEST: FleetMachineProbeRequest = {
+const REQUEST: Parameters<FleetMachineEndpointProbe>[0] = {
   machineId: "build-mac",
   transport: "mdns",
   endpoint: { host: "build-mac.local", port: 22 },

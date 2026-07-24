@@ -1,8 +1,8 @@
-export const FLEET_MACHINE_TRANSPORT_ORDER = ["tailscale", "mdns", "lan"] as const;
+const FLEET_MACHINE_TRANSPORT_ORDER = ["tailscale", "mdns", "lan"] as const;
 
-export type FleetMachineTransport = (typeof FLEET_MACHINE_TRANSPORT_ORDER)[number];
+type FleetMachineTransport = (typeof FLEET_MACHINE_TRANSPORT_ORDER)[number];
 
-export type FleetMachineEndpoint = {
+type FleetMachineEndpoint = {
   host: string;
   port: number;
 };
@@ -19,7 +19,7 @@ export type FleetMachineRecord = {
   endpoints: Partial<Record<FleetMachineTransport, FleetMachineEndpoint>>;
 };
 
-export type FleetMachineProbeErrorCode =
+type FleetMachineProbeErrorCode =
   | "transport_unreachable"
   | "host_unreachable"
   | "auth_failed"
@@ -34,7 +34,7 @@ export type FleetMachineEndpointProbeErrorCode = Exclude<
   "capability_missing" | "service_not_allowed"
 >;
 
-export type FleetMachineProbeAttempt = {
+type FleetMachineProbeAttempt = {
   transport: FleetMachineTransport;
   endpoint: FleetMachineEndpoint;
   result:
@@ -45,7 +45,7 @@ export type FleetMachineProbeAttempt = {
       };
 };
 
-export type FleetMachineProbeRequest = {
+type FleetMachineProbeRequest = {
   machineId: string;
   transport: FleetMachineTransport;
   endpoint: FleetMachineEndpoint;
@@ -56,7 +56,7 @@ export type FleetMachineEndpointProbe = (
   request: FleetMachineProbeRequest,
 ) => Promise<FleetMachineProbeAttempt["result"]>;
 
-export type FleetMachineProbeResult =
+type FleetMachineProbeResult =
   | {
       status: "reachable";
       machine: FleetMachineRecord;
@@ -121,7 +121,7 @@ export function defineFleetMachineInventory(
   return inventory;
 }
 
-export function fleetMachineAllowsService(machine: FleetMachineRecord, service: string): boolean {
+function fleetMachineAllowsService(machine: FleetMachineRecord, service: string): boolean {
   return machine.allowed_services.includes(service);
 }
 

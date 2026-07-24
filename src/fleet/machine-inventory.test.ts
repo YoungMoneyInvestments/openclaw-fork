@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   defineFleetMachineInventory,
-  fleetMachineAllowsService,
   probeFleetMachine,
   type FleetMachineEndpointProbe,
   type FleetMachineRecord,
@@ -31,7 +30,7 @@ describe("fleet machine inventory", () => {
     const inventory = defineFleetMachineInventory([record]);
 
     expect(inventory.get("build-mac")).toBe(record);
-    expect(fleetMachineAllowsService(record, "brokerbridge")).toBe(false);
+    expect(record.allowed_services.includes("brokerbridge")).toBe(false);
     expect(() => defineFleetMachineInventory([record, record])).toThrow(
       "Duplicate fleet machine id",
     );

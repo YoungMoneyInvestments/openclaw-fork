@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { FLEET_MACHINE_INVENTORY } from "../../scripts/fleet-machine-inventory.js";
-import { defineFleetMachineInventory, fleetMachineAllowsService } from "./machine-inventory.js";
+import { defineFleetMachineInventory } from "./machine-inventory.js";
 
 describe("canonical fleet machine inventory", () => {
   const inventory = defineFleetMachineInventory(FLEET_MACHINE_INVENTORY);
@@ -28,8 +28,5 @@ describe("canonical fleet machine inventory", () => {
     expect(owner?.allowed_services).toEqual(["brokerbridge", "arena", "cortex"]);
     expect(worker2021?.allowed_services).toEqual([]);
     expect(worker2016?.allowed_services).toEqual([]);
-    expect(owner && fleetMachineAllowsService(owner, "brokerbridge")).toBe(true);
-    expect(worker2021 && fleetMachineAllowsService(worker2021, "brokerbridge")).toBe(false);
-    expect(worker2016 && fleetMachineAllowsService(worker2016, "cortex")).toBe(false);
   });
 });
