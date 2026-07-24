@@ -1500,6 +1500,7 @@
     "dup:check": "node scripts/check-duplicates.mjs",
     "dup:check:coverage": "node scripts/check-duplicates.mjs --coverage",
     "dup:check:json": "node scripts/check-duplicates.mjs --json",
+    "fleet:probe": "node --import tsx scripts/fleet-machine-probe.ts",
     "format": "oxfmt --write --threads=1",
     "format:all": "pnpm format && pnpm format:swift",
     "format:check": "oxfmt --check",
