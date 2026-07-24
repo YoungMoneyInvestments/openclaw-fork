@@ -56,6 +56,7 @@ const repositoryScriptEntries = [
   "scripts/e2e/lib/run-with-pty.mjs!",
   "scripts/e2e/lib/upgrade-survivor/probe-gateway.mjs!",
   "scripts/embedded-run-abort-leak.ts!",
+  "scripts/fleet-machine-probe.ts!",
   "scripts/fixtures/packed-plugin-sdk-type-smoke.ts!",
   "scripts/ios-release-signing.mjs!",
   "scripts/lib/docker-plugin-selection.mjs!",

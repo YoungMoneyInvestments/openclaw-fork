@@ -2125,7 +2125,7 @@ export async function runReplyAgent(params: {
     });
     recordReplyUsageState(runId, replyUsageState);
     // Fail closed: unset verbose must not leak operational notices into chat.
-    const verboseEnabled = Boolean(resolvedVerboseLevel && resolvedVerboseLevel !== "off");
+    const verboseEnabled = resolvedVerboseLevel !== "off";
     const preserveUserFacingSessionState = shouldPreserveUserFacingSessionStateForInputProvenance(
       followupRun.run.inputProvenance,
     );
