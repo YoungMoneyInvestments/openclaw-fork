@@ -1484,6 +1484,90 @@ function canonicalOpenAIProfileSuffix(profileId: string): string {
   return profileId.slice(profileId.indexOf(":") + 1).trim() || "default";
 }
 
+function readOAuthRefreshToken(profile: unknown): string | undefined {
+  if (!isRecord(profile) || profile.type !== "oauth" || typeof profile.refresh !== "string") {
+    return undefined;
+  }
+  const refresh = profile.refresh.trim();
+  return refresh.length > 0 ? refresh : undefined;
+}
+
+function readOAuthExpires(profile: unknown): number {
+  return isRecord(profile) && typeof profile.expires === "number" ? profile.expires : 0;
+}
+
+function isOpenAIFamilyProfile(profileId: string, profile: unknown): boolean {
+  if (!isRecord(profile)) {
+    return false;
+  }
+  const provider =
+    typeof profile.provider === "string" ? profile.provider.trim().toLowerCase() : "";
+  return (
+    provider === OPENAI_PROVIDER_ID ||
+    provider === LEGACY_OPENAI_CODEX_PROVIDER_ID ||
+    profileId.startsWith(`${OPENAI_PROVIDER_ID}:`) ||
+    isLegacyOpenAICodexProfileId(profileId)
+  );
+}
+
+/**
+ * OAuth refresh tokens are single-use and rotate server-side on every exchange.
+ * Refresh is serialized per profile id, so two profiles holding the same token
+ * never serialize against each other: the first one to refresh consumes the
+ * token and every remaining copy is permanently rejected with
+ * `invalid_refresh_token`. Collapse duplicates onto the freshest profile so a
+ * provider only ever owns one live token family.
+ */
+function dedupeOpenAIProfilesBySharedRefreshToken(
+  profiles: Record<string, unknown>,
+): Map<string, string> {
+  const keptByRefreshToken = new Map<string, string>();
+  const removed = new Map<string, string>();
+  const ranked = Object.entries(profiles)
+    .filter(([profileId, profile]) => isOpenAIFamilyProfile(profileId, profile))
+    .toSorted(([leftId, left], [rightId, right]) => {
+      const byExpiry = readOAuthExpires(right) - readOAuthExpires(left);
+      // Freshest access token wins; canonical (shorter, unsuffixed) id breaks ties.
+      return byExpiry !== 0
+        ? byExpiry
+        : leftId.length - rightId.length || leftId.localeCompare(rightId);
+    });
+  for (const [profileId, profile] of ranked) {
+    const refresh = readOAuthRefreshToken(profile);
+    if (!refresh) {
+      continue;
+    }
+    const kept = keptByRefreshToken.get(refresh);
+    if (kept === undefined) {
+      keptByRefreshToken.set(refresh, profileId);
+      continue;
+    }
+    delete profiles[profileId];
+    removed.set(profileId, kept);
+  }
+  return removed;
+}
+
+function findOpenAIProfileIdSharingRefreshToken(
+  profiles: Record<string, unknown>,
+  legacyProfileId: string,
+  legacyProfile: Record<string, unknown>,
+): string | undefined {
+  const refresh = readOAuthRefreshToken(legacyProfile);
+  if (!refresh) {
+    return undefined;
+  }
+  for (const [profileId, profile] of Object.entries(profiles)) {
+    if (profileId === legacyProfileId || isLegacyOpenAICodexProfileId(profileId)) {
+      continue;
+    }
+    if (isOpenAIFamilyProfile(profileId, profile) && readOAuthRefreshToken(profile) === refresh) {
+      return profileId;
+    }
+  }
+  return undefined;
+}
+
 function allocateOpenAIProfileId(legacyProfileId: string, occupied: Set<string>): string {
   const suffix = canonicalOpenAIProfileSuffix(legacyProfileId);
   const direct = `${OPENAI_PROVIDER_ID}:${suffix}`;
@@ -1527,6 +1611,19 @@ function canonicalizeOpenAIProfileEntries(
       continue;
     }
     const mappedProfileId = legacyId ? options?.profileIdMap?.get(profileId) : undefined;
+    // A legacy entry that still carries a canonical profile's refresh token is a
+    // stale duplicate of it, not a new account. Minting another id here clones a
+    // single-use token into a second profile and bricks whichever copy refreshes
+    // second, so fold it onto the profile that already owns the token.
+    const sharedRefreshProfileId = legacyId
+      ? findOpenAIProfileIdSharingRefreshToken(profiles, profileId, rawProfile)
+      : undefined;
+    if (sharedRefreshProfileId) {
+      delete profiles[profileId];
+      profileIdMap.set(profileId, sharedRefreshProfileId);
+      changed = true;
+      continue;
+    }
     const nextProfileId =
       mappedProfileId && !occupied.has(mappedProfileId)
         ? mappedProfileId
@@ -1544,6 +1641,13 @@ function canonicalizeOpenAIProfileEntries(
       profileIdMap.set(profileId, nextProfileId);
     }
     profiles[nextProfileId] = nextProfile;
+    changed = true;
+  }
+
+  for (const [removedProfileId, keptProfileId] of dedupeOpenAIProfilesBySharedRefreshToken(
+    profiles,
+  )) {
+    profileIdMap.set(removedProfileId, keptProfileId);
     changed = true;
   }
 

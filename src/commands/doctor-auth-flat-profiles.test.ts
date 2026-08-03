@@ -2174,7 +2174,9 @@ describe("legacy OpenAI auth profiles through the canonical migration owner", ()
       version: 1,
       profiles: {
         "openai-codex:default": sharedAccount,
-        "openai-codex:copy": { ...sharedAccount },
+        // Same account, distinct token family: identity stays ambiguous without
+        // tripping the shared-refresh-token collapse below.
+        "openai-codex:copy": { ...sharedAccount, refresh: "shared-refresh-copy" },
       },
     });
     await maybeMigrateAuthProfileJsonStoresToSqlite({
@@ -2184,6 +2186,38 @@ describe("legacy OpenAI auth profiles through the canonical migration owner", ()
     });
 
     expect(collectOpenAICodexAuthProfileStoreIdMap({ cfg: {}, env: state.env }).size).toBe(0);
+  });
+
+  it("collapses migrated profiles that would share one rotating refresh token", async () => {
+    const state = await makeTestState();
+    const sharedAccount = {
+      type: "oauth",
+      provider: "openai-codex",
+      access: "shared-access",
+      refresh: "shared-refresh",
+      expires: 9_999_999_999_999,
+      accountId: "shared-account",
+    };
+    await writeLegacyAuthProfilesJson(state, {
+      version: 1,
+      profiles: {
+        "openai-codex:default": sharedAccount,
+        "openai-codex:copy": { ...sharedAccount },
+      },
+    });
+    await maybeMigrateAuthProfileJsonStoresToSqlite({
+      cfg: {},
+      env: state.env,
+      prompter: makePrompter(true),
+    });
+
+    const profiles = loadPersistedAuthProfileStore(state.agentDir())?.profiles ?? {};
+    const refreshTokens = Object.values(profiles).flatMap((profile) =>
+      profile?.type === "oauth" && profile.refresh ? [profile.refresh] : [],
+    );
+    // A refresh token is single-use; two profiles holding it brick whichever
+    // one refreshes second with invalid_refresh_token.
+    expect(refreshTokens).toStrictEqual(["shared-refresh"]);
   });
 
   it("keeps failed agent accounts separate while repairing verified and inherited main accounts", async () => {

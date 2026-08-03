@@ -71,6 +71,14 @@ if [ -z "$openclaw_system_launchd_conflict" ]; then
     if openclaw_system_launchd_entries=$(/usr/bin/mktemp "\${TMPDIR:-/tmp}/openclaw-launchd-scan.XXXXXX" 2>&1); then
       if /usr/bin/find "$openclaw_system_launchd_dir" -mindepth 1 -maxdepth 1 -name '*.plist' -print0 >"$openclaw_system_launchd_entries"; then
         while IFS= read -r -d '' openclaw_system_launchd_plist; do
+          if [ ! -r "$openclaw_system_launchd_plist" ]; then
+            # Root-owned vendor daemons commonly ship mode-0600 plists we cannot
+            # read as this unprivileged process (e.g. Microsoft Teams' updater,
+            # Oracle's Java helper). OpenClaw's own plist is always installed
+            # world-readable, so an unreadable plist can never be a same-label
+            # match; skip it instead of aborting the whole ownership scan.
+            continue
+          fi
           if openclaw_system_launchd_plist_label=$(/usr/bin/plutil -extract Label raw -o - -- "$openclaw_system_launchd_plist" 2>&1); then
             if [ "$openclaw_system_launchd_plist_label" != "$openclaw_system_launchd_label" ]; then
               continue
@@ -78,6 +86,11 @@ if [ -z "$openclaw_system_launchd_conflict" ]; then
             openclaw_system_launchd_conflict="$openclaw_system_launchd_plist"
             openclaw_system_launchd_detail="installed same-label system LaunchDaemon plist $openclaw_system_launchd_plist"
             break
+          elif printf '%s' "$openclaw_system_launchd_plist_label" | /usr/bin/grep -Eiq 'no value at that key path or invalid key path'; then
+            # plutil parsed this plist fine but it has no Label key at all (e.g. a
+            # neutered vendor stub like Keystone's disabled daemon plist left behind
+            # with an empty payload). It cannot collide with any label; skip it.
+            continue
           else
             openclaw_system_launchd_conflict="$openclaw_system_launchd_plist"
             openclaw_system_launchd_detail="could not inspect system LaunchDaemon plist $openclaw_system_launchd_plist: $openclaw_system_launchd_plist_label"
@@ -112,12 +125,44 @@ fi
 type LaunchDaemonPlistLabelResult =
   | { status: "ok"; label: string }
   | { status: "missing" }
+  | { status: "no-label" }
+  | { status: "unreadable" }
   | { status: "unverifiable"; detail: string };
+
+// plutil's exact wording when the plist parses fine but the requested key path
+// (Label) is absent — e.g. a neutered vendor stub left behind with an empty
+// `{}` payload, such as Google Keystone's disabled daemon plist. That is a
+// structurally valid plist with no Label, not a parse failure.
+const PLUTIL_NO_VALUE_AT_KEY_PATH = /no value at that key path or invalid key path/i;
+
+function isPermissionError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return code === "EACCES" || code === "EPERM";
+}
 
 /** Reads the top-level Label through the native parser for XML and binary plists. */
 export async function readLaunchDaemonPlistLabel(
   plistPath: string,
 ): Promise<LaunchDaemonPlistLabelResult> {
+  try {
+    await fs.access(plistPath, fs.constants.R_OK);
+  } catch (error) {
+    if (isMissingPathError(error)) {
+      return { status: "missing" };
+    }
+    // Root-owned vendor daemons commonly ship mode-0600 plists (observed in
+    // the wild: Microsoft Teams' updater, Oracle's Java helper). This
+    // unprivileged process can never read their Label, so it can never know
+    // whether they conflict -- but OpenClaw's own plist is always installed
+    // world-readable, so an unreadable plist can never be a same-label match
+    // either. Skip it instead of failing the whole ownership scan closed;
+    // treating "not something we can read" as a permanent refusal would block
+    // every restart on any Mac with at least one hardened vendor daemon.
+    if (isPermissionError(error)) {
+      return { status: "unreadable" };
+    }
+    return { status: "unverifiable", detail: formatUnknownError(error) };
+  }
   const extracted = await execFileUtf8(PLUTIL_PATH, [
     "-extract",
     "Label",
@@ -131,13 +176,10 @@ export async function readLaunchDaemonPlistLabel(
   if (extracted.code === 0 && label) {
     return { status: "ok", label };
   }
-  try {
-    await fs.access(plistPath);
-  } catch (error) {
-    if (isMissingPathError(error)) {
-      return { status: "missing" };
-    }
-    return { status: "unverifiable", detail: formatUnknownError(error) };
+  // A plist plutil can open but that has no Label key cannot collide with any
+  // label. Skip it instead of failing the whole system-ownership scan closed.
+  if (PLUTIL_NO_VALUE_AT_KEY_PATH.test(extracted.stderr || extracted.stdout)) {
+    return { status: "no-label" };
   }
   return {
     status: "unverifiable",

@@ -7,6 +7,7 @@ const state = vi.hoisted(() => ({
   accessErrors: new Map<string, string>(),
   readdirError: "",
   plutilLabels: new Map<string, string>(),
+  plutilNoLabelKeys: new Set<string>(),
 }));
 
 function fsError(code: string, target: string): NodeJS.ErrnoException {
@@ -40,6 +41,7 @@ vi.mock("node:fs/promises", () => {
       }
       return contents;
     }),
+    constants: { R_OK: 4 },
   };
   return { ...mocked, default: mocked };
 });
@@ -58,9 +60,19 @@ const execFileUtf8 = vi.hoisted(() =>
   vi.fn(async (_command: string, args: string[]) => {
     const target = args.at(-1) ?? "";
     const label = state.plutilLabels.get(target);
-    return label
-      ? { stdout: `${label}\n`, stderr: "", code: 0 }
-      : { stdout: "", stderr: "missing Label", code: 1 };
+    if (label) {
+      return { stdout: `${label}\n`, stderr: "", code: 0 };
+    }
+    if (state.plutilNoLabelKeys.has(target)) {
+      // The exact plutil wording for a structurally valid plist with no Label
+      // key (e.g. Google Keystone's neutered, empty `{}` daemon stub).
+      return {
+        stdout: "",
+        stderr: `${target}: Could not extract value, error: No value at that key path or invalid key path: Label`,
+        code: 1,
+      };
+    }
+    return { stdout: "", stderr: "missing Label", code: 1 };
   }),
 );
 
@@ -82,6 +94,7 @@ describe("system LaunchDaemon ownership", () => {
     state.accessErrors.clear();
     state.readdirError = "";
     state.plutilLabels.clear();
+    state.plutilNoLabelKeys.clear();
     if (originalPlatformDescriptor) {
       Object.defineProperty(process, "platform", {
         ...originalPlatformDescriptor,
@@ -176,16 +189,46 @@ describe("system LaunchDaemon ownership", () => {
     ]);
   });
 
-  it("fails closed on an unreadable noncanonical vendor plist", async () => {
+  it("skips an unreadable noncanonical vendor plist instead of failing closed", async () => {
+    // Root-owned vendor daemons commonly ship mode-0600 plists (observed in the
+    // wild: Microsoft Teams' updater, Oracle's Java helper). An unprivileged
+    // ownership scan can never read their Label, so it can never collide with
+    // them either; it must skip past them rather than refusing every restart.
     const unrelated = "/Library/LaunchDaemons/com.vendor.locked.plist";
     state.files.set(unrelated, "<plist/>");
     state.accessErrors.set(unrelated, "EACCES");
 
     await expect(inspectSystemLaunchDaemonOwnership("ai.openclaw.gateway")).resolves.toEqual({
+      status: "absent",
+      serviceTarget: "system/ai.openclaw.gateway",
+    });
+    expect(execFileUtf8).not.toHaveBeenCalled();
+  });
+
+  it("fails closed on a genuinely unexpected filesystem error reading a vendor plist", async () => {
+    const unrelated = "/Library/LaunchDaemons/com.vendor.io-error.plist";
+    state.files.set(unrelated, "<plist/>");
+    state.accessErrors.set(unrelated, "EIO");
+
+    await expect(inspectSystemLaunchDaemonOwnership("ai.openclaw.gateway")).resolves.toEqual({
       status: "unverifiable",
       serviceTarget: "system/ai.openclaw.gateway",
       operation: "filesystem",
-      detail: `${unrelated}: EACCES: ${unrelated}`,
+      detail: `${unrelated}: EIO: ${unrelated}`,
+    });
+  });
+
+  it("skips a readable plist that has no Label key instead of failing closed", async () => {
+    // Google Keystone ships a disabled daemon plist stripped down to an empty
+    // `{}` payload on some Macs. plutil parses it fine but there is no Label
+    // key to extract; that cannot collide with any label, so skip it.
+    const keystone = "/Library/LaunchDaemons/com.google.keystone.daemon.plist";
+    state.files.set(keystone, "<plist><dict/></plist>");
+    state.plutilNoLabelKeys.add(keystone);
+
+    await expect(inspectSystemLaunchDaemonOwnership("ai.openclaw.gateway")).resolves.toEqual({
+      status: "absent",
+      serviceTarget: "system/ai.openclaw.gateway",
     });
   });
 
@@ -250,5 +293,10 @@ describe("system LaunchDaemon ownership", () => {
       'if [ "$openclaw_system_launchd_plist_label" != "$openclaw_system_launchd_label" ]',
     );
     expect(script).not.toContain("|| true");
+    // Root-owned vendor daemon plists (mode 0600) must be skipped before ever
+    // invoking plutil, and a readable-but-Label-less plist (e.g. Keystone's
+    // neutered stub) must be skipped rather than aborting the whole scan.
+    expect(script).toContain('if [ ! -r "$openclaw_system_launchd_plist" ]');
+    expect(script).toContain("grep -Eiq 'no value at that key path or invalid key path'");
   });
 });
