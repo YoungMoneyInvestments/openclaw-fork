@@ -282,6 +282,7 @@ export async function prepareReplyAgentPayloads(state: {
   };
   const fallbackNoticePayloads: ReplyPayload[] = [];
   if (
+    verboseEnabled &&
     !fallbackExhausted &&
     !preserveUserFacingSessionState &&
     fallbackTransition.fallbackTransitioned
@@ -318,7 +319,12 @@ export async function prepareReplyAgentPayloads(state: {
       );
     }
   }
-  if (!fallbackExhausted && !preserveUserFacingSessionState && fallbackTransition.fallbackCleared) {
+  if (
+    verboseEnabled &&
+    !fallbackExhausted &&
+    !preserveUserFacingSessionState &&
+    fallbackTransition.fallbackCleared
+  ) {
     emitAgentEvent({
       runId,
       sessionKey,
