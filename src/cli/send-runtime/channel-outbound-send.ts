@@ -4,6 +4,7 @@ import { loadChannelOutboundAdapter } from "../../channels/plugins/outbound/load
 import type { ChannelId } from "../../channels/plugins/types.public.js";
 import { getRuntimeConfig } from "../../config/config.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import { PlatformMessageNotDispatchedError } from "../../infra/outbound/deliver-types.js";
 import type { OutboundDeliveryFormattingOptions } from "../../infra/outbound/formatting.js";
 import type { OutboundMediaAccess } from "../../media/load-options.js";
 
@@ -96,7 +97,19 @@ export function createChannelOutboundRuntimeSend(params: {
         return await outbound.sendMedia(buildContext());
       }
       if (!outbound?.sendText) {
-        throw new Error(params.unavailableMessage);
+        // Reaching here means no adapter send primitive was ever invoked, so no
+        // recipient-visible send can have begun. Assert that with the channel-owned
+        // marker instead of a bare Error: `isProvenDeliveryNotSentError` then routes
+        // the durable queue to `failDeliveryBeforePlatformSend`, which clears send
+        // evidence for a clean replay. A bare Error is indistinguishable from an
+        // ambiguous mid-send failure, so the queue conservatively parks the entry
+        // as maybe-sent and the message is silently dropped for headless callers.
+        // Retryable: adapter availability is a transient registry/startup condition,
+        // not a permanent payload or policy rejection.
+        throw new PlatformMessageNotDispatchedError(params.unavailableMessage, {
+          cause: new Error(params.unavailableMessage),
+          retryable: true,
+        });
       }
       return await outbound.sendText(buildContext());
     },
