@@ -1,5 +1,10 @@
 // Channel outbound send tests cover CLI send runtime handoff to channel outbound adapters.
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { isProvenDeliveryNotSentError } from "../../infra/delivery-recovery.shared.js";
+import {
+  isPlatformMessageRejectedError,
+  PlatformMessageNotDispatchedError,
+} from "../../infra/outbound/deliver-types.js";
 
 const mocks = vi.hoisted(() => ({
   loadChannelOutboundAdapter: vi.fn(),
@@ -277,5 +282,100 @@ describe("createChannelOutboundRuntimeSend", () => {
     expect(params.mediaReadFile).toBe(mediaReadFile);
     expect(params.accountId).toBe("default");
     expect(params.forceDocument).toBe(true);
+  });
+
+  describe("unavailable outbound adapter", () => {
+    // Regression: GAP-182. `openclaw message send` threw a bare Error when the
+    // channel outbound adapter could not be resolved. The durable queue cannot
+    // distinguish a bare Error from an ambiguous mid-send failure, so it parked
+    // the entry as maybe-sent and headless/cron callers lost the message.
+    async function sendWithAdapter(adapter: unknown) {
+      mocks.loadChannelOutboundAdapter.mockResolvedValue(adapter);
+      const { createChannelOutboundRuntimeSend } = await import("./channel-outbound-send.js");
+      const runtimeSend = createChannelOutboundRuntimeSend({
+        channelId: "discord" as never,
+        unavailableMessage: "discord outbound adapter is unavailable.",
+      });
+      return await runtimeSend
+        .sendMessage("channel:123", "hello", { cfg: {} })
+        .then(() => undefined)
+        .catch((err: unknown) => err);
+    }
+
+    it.each([
+      ["a missing adapter", undefined],
+      ["an adapter without sendText", { sendMedia: undefined, sendPayload: undefined }],
+    ])("marks %s as provably not dispatched", async (_label, adapter) => {
+      const err = await sendWithAdapter(adapter);
+
+      expect(err).toBeInstanceOf(PlatformMessageNotDispatchedError);
+      expect((err as Error).message).toBe("discord outbound adapter is unavailable.");
+      // The queue consults this to pick failDeliveryBeforePlatformSend, which
+      // clears platformSendStartedAt/recoveryState for a clean replay.
+      expect(isProvenDeliveryNotSentError(err)).toBe(true);
+    });
+
+    it("stays retryable so a transient registry gap is not dead-lettered", async () => {
+      const err = await sendWithAdapter(undefined);
+
+      expect((err as PlatformMessageNotDispatchedError).retryable).toBe(true);
+      // retryable:false would route to permanent dead-letter instead of a retry.
+      expect(isPlatformMessageRejectedError(err)).toBe(false);
+    });
+
+    it("never invokes a send primitive, so a retry cannot duplicate a send", async () => {
+      const sendText = vi.fn();
+      const sendMedia = vi.fn();
+      const sendPayload = vi.fn();
+      // sendText present but falsy-guarded off: adapter resolves, yet no usable
+      // text primitive exists. This is the exact shape that raised the error.
+      mocks.loadChannelOutboundAdapter.mockResolvedValue({
+        sendText: undefined,
+        sendMedia,
+        sendPayload,
+      });
+
+      const { createChannelOutboundRuntimeSend } = await import("./channel-outbound-send.js");
+      const runtimeSend = createChannelOutboundRuntimeSend({
+        channelId: "discord" as never,
+        unavailableMessage: "discord outbound adapter is unavailable.",
+      });
+
+      await expect(
+        runtimeSend.sendMessage("channel:123", "hello", { cfg: {} }),
+      ).rejects.toBeInstanceOf(PlatformMessageNotDispatchedError);
+
+      // The duplicate-send safety argument, asserted rather than reasoned:
+      // no provider I/O happened on the failing attempt, so replaying it can
+      // produce at most one recipient-visible message.
+      expect(sendText).not.toHaveBeenCalled();
+      expect(sendMedia).not.toHaveBeenCalled();
+      expect(sendPayload).not.toHaveBeenCalled();
+    });
+
+    it("does not claim not-dispatched once a send primitive was reached", async () => {
+      // Guards the inverse: a failure raised from inside sendText is ambiguous and
+      // must NOT be marked proven-not-sent, or the queue would replay a send that
+      // may already have reached the recipient.
+      const sendText = vi.fn(async () => {
+        throw new Error("socket hang up after write");
+      });
+      mocks.loadChannelOutboundAdapter.mockResolvedValue({ sendText });
+
+      const { createChannelOutboundRuntimeSend } = await import("./channel-outbound-send.js");
+      const runtimeSend = createChannelOutboundRuntimeSend({
+        channelId: "discord" as never,
+        unavailableMessage: "discord outbound adapter is unavailable.",
+      });
+
+      const err = await runtimeSend
+        .sendMessage("channel:123", "hello", { cfg: {} })
+        .then(() => undefined)
+        .catch((caught: unknown) => caught);
+
+      expect(sendText).toHaveBeenCalledTimes(1);
+      expect(err).not.toBeInstanceOf(PlatformMessageNotDispatchedError);
+      expect(isProvenDeliveryNotSentError(err)).toBe(false);
+    });
   });
 });
