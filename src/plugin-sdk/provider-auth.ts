@@ -127,6 +127,10 @@ export {
   hasUsableOAuthCredential,
 } from "../agents/auth-profiles/credential-state.js";
 export {
+  areOAuthCredentialsEquivalent,
+  hasMatchingOAuthIdentity,
+} from "../agents/auth-profiles/oauth-shared.js";
+export {
   COPILOT_EDITOR_PLUGIN_VERSION,
   COPILOT_EDITOR_VERSION,
   COPILOT_GITHUB_API_VERSION,
