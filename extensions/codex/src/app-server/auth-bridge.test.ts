@@ -1367,6 +1367,68 @@ describe("bridgeCodexAppServerStartOptions", () => {
     }
   });
 
+  it("persists a rotated scoped OAuth refresh for a same-identity OpenClaw-owned profile", async () => {
+    // GAP-228: a scoped credential that isn't runtime-external (i.e. it's our
+    // own profile, just handed in as a caller-supplied snapshot) and shares
+    // the persisted profile's identity must have its rotated tokens written
+    // back to disk - otherwise the single-use refresh token OpenAI already
+    // consumed is stranded only in memory and the next process to load the
+    // persisted profile hits invalid_refresh_token immediately.
+    const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-codex-app-server-"));
+    const request = vi.fn(async () => ({ type: "chatgptAuthTokens" }));
+    oauthMocks.refreshOpenAICodexToken.mockResolvedValueOnce({
+      access: "scoped-refreshed-access",
+      refresh: "scoped-refreshed-refresh",
+      expires: Date.now() + 60_000,
+      accountId: "shared-account",
+    });
+    try {
+      upsertAuthProfile({
+        agentDir,
+        profileId: "openai:work",
+        credential: {
+          type: "oauth",
+          provider: "openai",
+          access: "persisted-access",
+          refresh: "persisted-refresh",
+          expires: Date.now() + 24 * 60 * 60_000,
+          accountId: "shared-account",
+        },
+      });
+      const authProfileStore: AuthProfileStore = {
+        version: 1,
+        profiles: {
+          "openai:work": {
+            type: "oauth",
+            provider: "openai",
+            access: "scoped-expired-access",
+            refresh: "scoped-refresh",
+            expires: Date.now() - 60_000,
+            accountId: "shared-account",
+          },
+        },
+      };
+
+      await applyCodexAppServerAuthProfile({
+        client: { request } as never,
+        agentDir,
+        authProfileId: "openai:work",
+        authProfileStore,
+      });
+
+      expect(oauthMocks.refreshOpenAICodexToken).toHaveBeenCalledWith("scoped-refresh");
+      expect(loadAuthProfileStoreForSecretsRuntime(agentDir).profiles["openai:work"]).toMatchObject(
+        {
+          access: "scoped-refreshed-access",
+          refresh: "scoped-refreshed-refresh",
+          accountId: "shared-account",
+        },
+      );
+    } finally {
+      await fs.rm(agentDir, { recursive: true, force: true });
+    }
+  });
+
   it("keeps an ambiguous supplied OAuth identity scoped", async () => {
     const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-codex-app-server-"));
     const request = vi.fn(async () => ({ type: "chatgptAuthTokens" }));
