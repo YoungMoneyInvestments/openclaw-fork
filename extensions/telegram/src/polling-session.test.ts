@@ -876,6 +876,59 @@ describe("TelegramPollingSession", () => {
     closeOpenClawStateDatabaseForTest();
   });
 
+  it("stops isolated polling when abort lands before its shutdown listener is registered", async () => {
+    const abort = new AbortController();
+    const worker = createIdleIngressWorker();
+    let workerCreated = false;
+    const createWorker = vi.fn(() => {
+      workerCreated = true;
+      return worker.createWorker();
+    });
+    createTelegramBotMock.mockReturnValueOnce(makeIsolatedBot({ handleUpdate: vi.fn() }));
+    const addEventListener = abort.signal.addEventListener.bind(abort.signal);
+    vi.spyOn(abort.signal, "addEventListener").mockImplementation((type, listener, options) => {
+      if (workerCreated && !abort.signal.aborted) {
+        abort.abort();
+      }
+      addEventListener(type, listener, options);
+    });
+
+    await createPollingSession({
+      abortSignal: abort.signal,
+      isolatedIngress: { enabled: true, createWorker },
+    }).runUntilAbort();
+
+    expect(worker.workerStop).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops classic polling when abort lands before its shutdown listener is registered", async () => {
+    const abort = new AbortController();
+    let runnerCreated = false;
+    let finishTask: (() => void) | undefined;
+    const task = new Promise<void>((resolve) => (finishTask = resolve));
+    const runnerStop = vi.fn(async () => finishTask?.());
+    createTelegramBotMock.mockReturnValueOnce(makeBot());
+    runMock.mockImplementation(() => {
+      runnerCreated = true;
+      return {
+        task: () => task,
+        stop: runnerStop,
+        isRunning: () => true,
+      };
+    });
+    const addEventListener = abort.signal.addEventListener.bind(abort.signal);
+    vi.spyOn(abort.signal, "addEventListener").mockImplementation((type, listener, options) => {
+      if (runnerCreated && !abort.signal.aborted) {
+        abort.abort();
+      }
+      addEventListener(type, listener, options);
+    });
+
+    await createPollingSession({ abortSignal: abort.signal }).runUntilAbort();
+
+    expect(runnerStop).toHaveBeenCalledTimes(1);
+  });
+
   it("uses backoff helpers for recoverable polling retries", async () => {
     const abort = new AbortController();
     const recoverableError = new Error("recoverable polling error");

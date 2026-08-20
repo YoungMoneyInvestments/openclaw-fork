@@ -572,6 +572,9 @@ export class TelegramPollingSession {
       void stopWorker();
     };
     this.opts.abortSignal?.addEventListener("abort", stopOnAbort, { once: true });
+    if (this.opts.abortSignal?.aborted) {
+      stopOnAbort();
+    }
     // Fail closed when the spool stops making progress: keeping any claim live would
     // prevent a healthy process from recovering a wedged drain.
     const stopBot = () => {
@@ -816,6 +819,9 @@ export class TelegramPollingSession {
     }, POLL_WATCHDOG_INTERVAL_MS);
 
     this.opts.abortSignal?.addEventListener("abort", stopOnAbort, { once: true });
+    if (this.opts.abortSignal?.aborted) {
+      stopOnAbort();
+    }
     try {
       await Promise.race([runner.task(), forceCyclePromise]);
       clearForceCycleTimer();
