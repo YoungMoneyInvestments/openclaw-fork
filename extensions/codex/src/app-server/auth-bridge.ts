@@ -21,7 +21,12 @@ import {
   type AuthProfileStore,
   type OAuthCredential,
 } from "openclaw/plugin-sdk/agent-runtime";
-import { hasUsableOAuthCredential } from "openclaw/plugin-sdk/provider-auth";
+import {
+  areOAuthCredentialsEquivalent,
+  hasMatchingOAuthIdentity,
+  hasUsableOAuthCredential,
+  updateAuthProfileStoreWithLock,
+} from "openclaw/plugin-sdk/provider-auth";
 import { readSecretFile } from "openclaw/plugin-sdk/secret-file";
 import { resolveCodexAppServerHomeDir, withEphemeralCodexAuthStore } from "./auth-start-options.js";
 import type { CodexAppServerClient } from "./client.js";
@@ -932,6 +937,7 @@ async function resolveOAuthCredentialForCodexAppServer(
       profileId,
       credential: overlaidOAuthCredential,
       forceRefresh: params.forceRefresh,
+      agentDir: ownerAgentDir,
     });
   }
   if (params.forceRefresh && !persistedOAuthCredential && overlaidOAuthCredential) {
@@ -997,15 +1003,35 @@ function shouldUseScopedOAuthCredential(params: {
   );
 }
 
-function hasMatchingOAuthIdentity(persisted: OAuthCredential, supplied: OAuthCredential): boolean {
-  const persistedAccountId = persisted.accountId?.trim();
-  const suppliedAccountId = supplied.accountId?.trim();
-  if (persistedAccountId && suppliedAccountId) {
-    return persistedAccountId === suppliedAccountId;
-  }
-  const persistedEmail = persisted.email?.trim().toLowerCase();
-  const suppliedEmail = supplied.email?.trim().toLowerCase();
-  return Boolean(persistedEmail && suppliedEmail && persistedEmail === suppliedEmail);
+// GAP-228: scoped stores are process-local, so a rotated refresh token that
+// only lands here is lost on exit while the persisted profile is left holding
+// the single-use refresh token OpenAI already invalidated. Persist through
+// the same locked CAS the core oauth-manager refresh flow uses
+// (src/agents/auth-profiles/oauth-manager.ts resolveOAuthCredentialAfterPersistMiss)
+// so a concurrent re-login always wins over a stale rotation instead of being
+// clobbered by it.
+async function persistScopedOAuthRefresh(params: {
+  agentDir?: string;
+  profileId: string;
+  before: OAuthCredential;
+  refreshed: OAuthCredential;
+}): Promise<void> {
+  await updateAuthProfileStoreWithLock({
+    agentDir: params.agentDir,
+    updater: (store) => {
+      const existing = store.profiles[params.profileId];
+      if (
+        existing?.type !== "oauth" ||
+        existing.provider !== params.refreshed.provider ||
+        (!areOAuthCredentialsEquivalent(existing, params.before) &&
+          !hasMatchingOAuthIdentity(existing, params.refreshed))
+      ) {
+        return false;
+      }
+      store.profiles[params.profileId] = { ...params.refreshed };
+      return true;
+    },
+  });
 }
 
 async function resolveScopedOAuthCredential(params: {
@@ -1013,6 +1039,7 @@ async function resolveScopedOAuthCredential(params: {
   profileId: string;
   credential: OAuthCredential;
   forceRefresh: boolean;
+  agentDir?: string;
 }): Promise<OAuthCredential> {
   const existingRefresh = scopedOAuthRefreshQueues.get(params.store)?.get(params.profileId);
   if (existingRefresh) {
@@ -1040,6 +1067,17 @@ async function resolveScopedOAuthCredential(params: {
       );
     }
     params.store.profiles[params.profileId] = refreshed;
+    // Runtime-external profiles overlay a credential OpenClaw does not own
+    // (e.g. an external CLI's own auth file) - never fold their rotated
+    // tokens into our persisted store, identity match or not.
+    if (!params.store.runtimeExternalProfileIds?.includes(params.profileId)) {
+      await persistScopedOAuthRefresh({
+        agentDir: params.agentDir,
+        profileId: params.profileId,
+        before: credential,
+        refreshed,
+      });
+    }
     return refreshed;
   })();
   storeRefreshes.set(params.profileId, refresh);
