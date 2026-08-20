@@ -489,8 +489,9 @@ export class TelegramPollingSession {
         }
       };
       if (message.type === "poll-start") {
+        const attribution = `pollerId=${message.pollerId ?? "unknown"} workerThreadId=${message.workerThreadId ?? "unknown"} requestSeq=${message.requestSeq ?? "unknown"}`;
         this.opts.log(
-          `[telegram][diag] isolated polling worker poll-start offset=${message.offset ?? "null"}`,
+          `[telegram][diag] isolated polling worker poll-start ${attribution} offset=${message.offset ?? "null"}`,
         );
         liveness.noteGetUpdatesStarted({ offset: message.offset }, message.startedAt);
         pollState.startedAt = message.startedAt;
@@ -501,6 +502,9 @@ export class TelegramPollingSession {
         return;
       }
       if (message.type === "poll-success") {
+        this.opts.log(
+          `[telegram][diag] isolated polling worker poll-success pollerId=${message.pollerId ?? "unknown"} workerThreadId=${message.workerThreadId ?? "unknown"} requestSeq=${message.requestSeq ?? "unknown"} offset=${message.offset ?? "null"} count=${message.count}`,
+        );
         liveness.noteGetUpdatesSuccessCount(message.count, message.finishedAt);
         liveness.noteGetUpdatesFinished();
         this.#noteHealthyPollingCycle();
@@ -512,6 +516,9 @@ export class TelegramPollingSession {
         return;
       }
       if (message.type === "poll-error") {
+        this.opts.log(
+          `[telegram][diag] isolated polling worker poll-error pollerId=${message.pollerId ?? "unknown"} workerThreadId=${message.workerThreadId ?? "unknown"} requestSeq=${message.requestSeq ?? "unknown"} errorCode=${message.errorCode ?? "unknown"}`,
+        );
         this.#rearmPendingDeliveryDrain();
         liveness.noteGetUpdatesError(new Error(message.message), message.finishedAt);
         liveness.noteGetUpdatesFinished();

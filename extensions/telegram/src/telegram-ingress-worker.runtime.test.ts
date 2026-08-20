@@ -5,7 +5,10 @@ import type {
   TelegramIngressWorkerCommand,
   TelegramIngressWorkerMessage,
 } from "./telegram-ingress-worker.js";
-import { runTelegramIngressWorkerRuntime } from "./telegram-ingress-worker.runtime.js";
+import {
+  postUnreportedTelegramPollError,
+  runTelegramIngressWorkerRuntime,
+} from "./telegram-ingress-worker.runtime.js";
 
 type RuntimePort = Parameters<typeof runTelegramIngressWorkerRuntime>[0]["port"];
 
@@ -99,6 +102,35 @@ afterEach(() => {
 });
 
 describe("telegram ingress worker poll cadence", () => {
+  it("attributes every poll outcome to one worker and increasing request sequence", async () => {
+    vi.useFakeTimers();
+    const runtime = createRuntime(
+      [jsonResponse(200, { ok: true, result: [] }), jsonResponse(200, { ok: true, result: [] })],
+      { stopAfterPollSuccesses: 2 },
+    );
+
+    await flushRuntime();
+    await runtime.done;
+
+    const pollMessages = runtime.messages.filter(
+      (message) => message.type === "poll-start" || message.type === "poll-success",
+    );
+    const workerThreadId = pollMessages[0]?.workerThreadId;
+    expect(workerThreadId).toEqual(expect.any(Number));
+    expect(
+      pollMessages.map(({ pollerId, workerThreadId, requestSeq }) => ({
+        pollerId,
+        workerThreadId,
+        requestSeq,
+      })),
+    ).toEqual([
+      { pollerId: "direct-runtime", workerThreadId, requestSeq: 1 },
+      { pollerId: "direct-runtime", workerThreadId, requestSeq: 1 },
+      { pollerId: "direct-runtime", workerThreadId, requestSeq: 2 },
+      { pollerId: "direct-runtime", workerThreadId, requestSeq: 2 },
+    ]);
+  });
+
   it("confirms polling connectivity before entering the first long poll", async () => {
     vi.useFakeTimers();
     const runtime = createRuntime(
@@ -126,7 +158,13 @@ describe("telegram ingress worker poll cadence", () => {
 
     await flushRuntime();
     expect(runtime.messages).toContainEqual(
-      expect.objectContaining({ type: "poll-error", errorCode: 502 }),
+      expect.objectContaining({
+        type: "poll-error",
+        errorCode: 502,
+        pollerId: "direct-runtime",
+        workerThreadId: expect.any(Number),
+        requestSeq: 1,
+      }),
     );
     await vi.advanceTimersByTimeAsync(1_000);
     await flushRuntime();
@@ -318,9 +356,15 @@ describe("telegram ingress worker retry policy", () => {
 
     expect(runtime.calls).toHaveLength(1);
     await flushRuntime();
-    expect(runtime.messages).toContainEqual(
-      expect.objectContaining({ type: "poll-error", errorCode: status }),
-    );
+    expect(runtime.messages.filter((message) => message.type === "poll-error")).toEqual([
+      expect.objectContaining({
+        type: "poll-error",
+        errorCode: status,
+        pollerId: "direct-runtime",
+        workerThreadId: expect.any(Number),
+        requestSeq: 1,
+      }),
+    ]);
     await vi.advanceTimersByTimeAsync(999);
     expect(runtime.calls).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(1);
@@ -365,11 +409,46 @@ describe("telegram ingress worker retry policy", () => {
       }),
     ]);
 
-    await expect(runtime.done).rejects.toThrow(
-      status === 401 ? "Unauthorized" : "Conflict: terminated by other getUpdates request",
+    const err = await runtime.done.catch((caught: unknown) => caught);
+    expect(err).toEqual(
+      expect.objectContaining({
+        message:
+          status === 401 ? "Unauthorized" : "Conflict: terminated by other getUpdates request",
+      }),
     );
-    expect(runtime.messages).toContainEqual(
-      expect.objectContaining({ type: "poll-error", errorCode: status }),
-    );
+    postUnreportedTelegramPollError({
+      port: { postMessage: (message) => runtime.messages.push(message) },
+      err,
+      pollerId: "direct-runtime",
+      workerThreadId: 99,
+    });
+    expect(runtime.messages.filter((message) => message.type === "poll-error")).toEqual([
+      expect.objectContaining({
+        type: "poll-error",
+        errorCode: status,
+        pollerId: "direct-runtime",
+        workerThreadId: expect.any(Number),
+        requestSeq: 1,
+      }),
+    ]);
+  });
+
+  it("attributes an unreported worker startup error outside a polling request", () => {
+    const messages: TelegramIngressWorkerMessage[] = [];
+    postUnreportedTelegramPollError({
+      port: { postMessage: (message) => messages.push(message) },
+      err: new Error("startup failed"),
+      pollerId: "worker-1",
+      workerThreadId: 7,
+    });
+
+    expect(messages).toEqual([
+      expect.objectContaining({
+        type: "poll-error",
+        pollerId: "worker-1",
+        workerThreadId: 7,
+        requestSeq: 0,
+      }),
+    ]);
   });
 });
