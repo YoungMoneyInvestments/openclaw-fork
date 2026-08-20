@@ -1,5 +1,5 @@
 // Telegram plugin module implements telegram ingress worker behavior.
-import { parentPort, workerData } from "node:worker_threads";
+import { parentPort, threadId, workerData } from "node:worker_threads";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import { readResponseWithLimit } from "openclaw/plugin-sdk/response-limit-runtime";
 import {
@@ -61,6 +61,7 @@ type TelegramIngressRuntimePort = {
   onMessage(listener: (message: TelegramIngressWorkerCommand) => void): void;
   close(): void;
 };
+type TelegramIngressMessagePort = Pick<TelegramIngressRuntimePort, "postMessage">;
 
 type TelegramIngressRuntimeDeps = {
   fetch?: typeof fetch;
@@ -68,8 +69,11 @@ type TelegramIngressRuntimeDeps = {
 };
 
 type TelegramIngressWorkerRuntimeData = TelegramIngressWorkerOptions & {
+  pollerId: string;
   runtime: typeof TELEGRAM_INGRESS_WORKER_RUNTIME_MARKER;
 };
+
+const reportedPollErrors = new WeakSet<object>();
 
 function readTelegramErrorCode(err: unknown): number | undefined {
   if (err && typeof err === "object" && "error_code" in err) {
@@ -81,13 +85,37 @@ function readTelegramErrorCode(err: unknown): number | undefined {
   return undefined;
 }
 
-function postPollError(port: TelegramIngressRuntimePort, err: unknown): void {
+function postPollError(
+  port: TelegramIngressMessagePort,
+  err: unknown,
+  attribution: { pollerId: string; workerThreadId: number; requestSeq: number },
+): void {
+  if (err !== null && typeof err === "object") {
+    reportedPollErrors.add(err);
+  }
   const errorCode = readTelegramErrorCode(err);
   port.postMessage({
     type: "poll-error",
+    ...attribution,
     message: formatErrorMessage(err),
     ...(errorCode === undefined ? {} : { errorCode }),
     finishedAt: Date.now(),
+  });
+}
+
+export function postUnreportedTelegramPollError(params: {
+  port: TelegramIngressMessagePort;
+  err: unknown;
+  pollerId: string;
+  workerThreadId: number;
+}): void {
+  if (params.err !== null && typeof params.err === "object" && reportedPollErrors.has(params.err)) {
+    return;
+  }
+  postPollError(params.port, params.err, {
+    pollerId: params.pollerId,
+    workerThreadId: params.workerThreadId,
+    requestSeq: 0,
   });
 }
 
@@ -169,6 +197,7 @@ export async function runTelegramIngressWorkerRuntime(params: {
   options: TelegramIngressWorkerOptions;
   port: TelegramIngressRuntimePort;
   deps?: TelegramIngressRuntimeDeps;
+  attribution?: { pollerId: string; workerThreadId: number };
 }): Promise<void> {
   const { options, port } = params;
   const stopController = new AbortController();
@@ -191,6 +220,11 @@ export async function runTelegramIngressWorkerRuntime(params: {
   let failures = 0;
   let consecutiveEmptyPolls = 0;
   let pollingConfirmed = false;
+  let requestSeq = 0;
+  const attribution = params.attribution ?? {
+    pollerId: "direct-runtime",
+    workerThreadId: threadId,
+  };
 
   port.onMessage((message) => {
     if (message?.type === "stop") {
@@ -240,7 +274,9 @@ export async function runTelegramIngressWorkerRuntime(params: {
       }
       const offset = lastUpdateId === null ? null : lastUpdateId + 1;
       const startedAt = Date.now();
-      port.postMessage({ type: "poll-start", offset, startedAt });
+      requestSeq += 1;
+      const requestAttribution = { ...attribution, requestSeq };
+      port.postMessage({ type: "poll-start", ...requestAttribution, offset, startedAt });
       try {
         const result = await fetchJson({
           fetch: fetchImpl,
@@ -274,6 +310,7 @@ export async function runTelegramIngressWorkerRuntime(params: {
         failures = 0;
         port.postMessage({
           type: "poll-success",
+          ...requestAttribution,
           offset,
           count: result.length,
           finishedAt: Date.now(),
@@ -303,7 +340,7 @@ export async function runTelegramIngressWorkerRuntime(params: {
         }
         consecutiveEmptyPolls = 0;
         failures += 1;
-        postPollError(port, err);
+        postPollError(port, err, requestAttribution);
         // 409 must propagate to the parent: it owns duplicate-poller/webhook
         // conflict recovery. Transient Bot API errors stay local to this worker.
         if (!isRetryableTelegramApiError(err, { context: "polling" })) {
@@ -365,12 +402,18 @@ if (runtimePort && runtimeOptions) {
   runTelegramIngressWorkerRuntime({
     options: runtimeOptions,
     port: runtimePort,
+    attribution: { pollerId: runtimeOptions.pollerId, workerThreadId: threadId },
   })
     .then(() => {
       runtimePort.close();
     })
     .catch((err: unknown) => {
-      postPollError(runtimePort, err);
+      postUnreportedTelegramPollError({
+        port: runtimePort,
+        err,
+        pollerId: runtimeOptions.pollerId,
+        workerThreadId: threadId,
+      });
       runtimePort.close();
       process.exitCode = exitedAfterStop ? 0 : 1;
     });

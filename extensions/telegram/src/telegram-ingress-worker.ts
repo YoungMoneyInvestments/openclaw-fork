@@ -1,4 +1,5 @@
 // Telegram plugin module implements telegram ingress worker behavior.
+import { randomUUID } from "node:crypto";
 import { Worker } from "node:worker_threads";
 import type { TelegramNetworkConfig } from "openclaw/plugin-sdk/config-contracts";
 
@@ -8,17 +9,26 @@ const TELEGRAM_INGRESS_WORKER_STOP_GRACE_MS = 2_000;
 export type TelegramIngressWorkerMessage =
   | {
       type: "poll-start";
+      pollerId?: string;
+      workerThreadId?: number;
+      requestSeq?: number;
       offset: number | null;
       startedAt: number;
     }
   | {
       type: "poll-success";
+      pollerId?: string;
+      workerThreadId?: number;
+      requestSeq?: number;
       offset: number | null;
       count: number;
       finishedAt: number;
     }
   | {
       type: "poll-error";
+      pollerId?: string;
+      workerThreadId?: number;
+      requestSeq?: number;
       message: string;
       /** Telegram Bot API error_code (e.g. 409 for getUpdates conflicts). */
       errorCode?: number;
@@ -114,8 +124,9 @@ async function stopTelegramIngressWorker(params: {
 
 export const createTelegramIngressWorker: TelegramIngressWorkerFactory = (options) => {
   const listeners = new Set<(message: TelegramIngressWorkerMessage) => void>();
+  const pollerId = randomUUID();
   const worker = new Worker(new URL("./telegram-ingress-worker.runtime.js", import.meta.url), {
-    workerData: { ...options, runtime: TELEGRAM_INGRESS_WORKER_RUNTIME_MARKER },
+    workerData: { ...options, pollerId, runtime: TELEGRAM_INGRESS_WORKER_RUNTIME_MARKER },
   });
   const taskPromise = new Promise<void>((resolve, reject) => {
     worker.once("error", reject);
