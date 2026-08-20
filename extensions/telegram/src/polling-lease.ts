@@ -185,13 +185,10 @@ export async function acquireTelegramPollingLease(
       continue;
     }
 
-    return createLease({
+    throw createDuplicatePollingError({
       accountId: opts.accountId,
-      abortSignal: opts.abortSignal,
-      registry,
+      existing,
       tokenFingerprint: fingerprint,
-      waitedForPrevious,
-      replacedStoppingPrevious: true,
     });
   }
 }
@@ -210,15 +207,9 @@ export async function releaseStoppedTelegramPollingLease(
     return false;
   }
 
-  const waitResult = await waitForPreviousRelease({
+  await waitForPreviousRelease({
     done: existing.done,
     waitMs: opts.waitMs ?? DEFAULT_TELEGRAM_POLLING_LEASE_WAIT_MS,
   });
-  if (waitResult === "released" || registry.get(fingerprint) !== existing) {
-    return false;
-  }
-
-  registry.delete(fingerprint);
-  existing.resolveDone();
-  return true;
+  return false;
 }
