@@ -175,6 +175,9 @@ export function createVectorIndexProviderDiagnostic(
   return {
     id: "memory-core-vector-index-provider-diagnostic",
     label: "Memory Core vector index provider readiness",
+    // Advisory-only: a degraded embedding provider must not block gateway
+    // startup readiness. Surface it through explicit `doctor --fix` instead.
+    doctorOnly: true,
     async detectLegacyState(params) {
       const findings = await collectVectorProviderFindings(params, inspectProvider);
       return findings.length > 0
