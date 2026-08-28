@@ -20,6 +20,10 @@ import {
   type LegacyConfigRule,
 } from "../../../config/legacy.shared.js";
 import { isBlockedObjectKey } from "../../../infra/prototype-keys.js";
+import {
+  modelEntryWithRuntimePolicy,
+  selectedCanonicalModelRefsForRuntimePolicy,
+} from "./legacy-runtime-model-policy.js";
 import { listLegacyRuntimeModelProviderAliases } from "./legacy-runtime-model-providers.js";
 
 const CHANNEL_HEARTBEAT_KEYS = new Set(["showOk", "showAlerts", "useIndicator"]);
@@ -708,61 +712,6 @@ function resolveLegacyAgentRuntimeIntent(raw: unknown): LegacyAgentRuntimeIntent
   return alias ? { provider: alias.provider, runtime: alias.runtime } : undefined;
 }
 
-function selectedCanonicalModelRefsForRuntimePolicy(rawModel: unknown, provider: string): string[] {
-  const refs: string[] = [];
-  const addRef = (rawRef: unknown) => {
-    if (typeof rawRef !== "string") {
-      return;
-    }
-    const trimmed = rawRef.trim();
-    const slash = trimmed.indexOf("/");
-    if (slash <= 0 || slash >= trimmed.length - 1) {
-      return;
-    }
-    if (normalizeProviderId(trimmed.slice(0, slash)) !== normalizeProviderId(provider)) {
-      return;
-    }
-    refs.push(trimmed);
-  };
-
-  if (typeof rawModel === "string") {
-    addRef(rawModel);
-    return refs;
-  }
-  const model = getRecord(rawModel);
-  if (!model) {
-    return refs;
-  }
-  addRef(model.primary);
-  if (Array.isArray(model.fallbacks)) {
-    for (const fallback of model.fallbacks) {
-      addRef(fallback);
-    }
-  }
-  return refs;
-}
-
-function modelEntryWithRuntimePolicy(
-  entry: unknown,
-  runtime: string,
-): {
-  changed: boolean;
-  entry: Record<string, unknown>;
-} {
-  const base = getRecord(entry) ? { ...(entry as Record<string, unknown>) } : {};
-  const currentRuntime = getRecord(base.agentRuntime);
-  const currentRuntimeId =
-    typeof currentRuntime?.id === "string" ? currentRuntime.id.trim().toLowerCase() : "";
-  if (currentRuntimeId && currentRuntimeId !== "auto") {
-    return { changed: false, entry: base };
-  }
-  base.agentRuntime = {
-    ...currentRuntime,
-    id: runtime,
-  };
-  return { changed: true, entry: base };
-}
-
 function preserveLegacyWholeAgentRuntimePolicy(
   container: Record<string, unknown>,
   pathLabel: string,
@@ -1314,8 +1263,46 @@ function listInheritedProviderPoliciesWithProfiles(
   return entries;
 }
 
+function bindingMatchHasLegacyDmPeerKind(binding: unknown): boolean {
+  const match = getRecord(getRecord(binding)?.match);
+  const peer = getRecord(match?.peer);
+  return peer !== null && peer.kind === "dm";
+}
+
+const BINDING_DM_PEER_KIND_RULE: LegacyConfigRule = {
+  path: ["bindings"],
+  message:
+    'bindings[].match.peer.kind uses the retired "dm" alias; use "direct". Run "openclaw doctor --fix".',
+  match: (value) =>
+    Array.isArray(value) && value.some((binding) => bindingMatchHasLegacyDmPeerKind(binding)),
+};
+
 /** Legacy config migration specs for agent/runtime-owned config keys. */
 export const LEGACY_CONFIG_MIGRATIONS_RUNTIME_AGENTS: LegacyConfigMigrationSpec[] = [
+  defineLegacyConfigMigration({
+    id: "bindings.match.peer.kind.dm-to-direct",
+    describe: "Move deprecated bindings match.peer.kind dm values to direct",
+    legacyRules: [BINDING_DM_PEER_KIND_RULE],
+    apply: (raw, changes) => {
+      if (!Array.isArray(raw.bindings)) {
+        return;
+      }
+      let migrated = 0;
+      for (const binding of raw.bindings) {
+        const match = getRecord(getRecord(binding)?.match);
+        const peer = getRecord(match?.peer);
+        if (peer !== null && peer.kind === "dm") {
+          peer.kind = "direct";
+          migrated += 1;
+        }
+      }
+      if (migrated > 0) {
+        changes.push(
+          `Moved deprecated bindings[].match.peer.kind "dm" → "direct" for ${migrated} binding${migrated === 1 ? "" : "s"}.`,
+        );
+      }
+    },
+  }),
   defineLegacyConfigMigration({
     id: "tools.profile-configured-sections-alsoAllow",
     describe: "Repair explicit configured-section tool grants filtered by profiles",

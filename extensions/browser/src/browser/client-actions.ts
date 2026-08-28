@@ -14,6 +14,8 @@ export {
 } from "./client-actions-core.js";
 export {
   browserConsoleMessages,
-  browserPageContent,
+  browserRequests,
+  browserPageText,
+  browserEmulateSetting,
   browserPdfSave,
 } from "./client-actions-observe.js";

@@ -1,5 +1,6 @@
 import { resolveSendableOutboundReplyParts } from "openclaw/plugin-sdk/reply-payload";
 import { sanitizeUserFacingText } from "../../agents/embedded-agent-helpers/sanitize-user-facing-text.js";
+import { renderUserFacingText } from "../../agents/embedded-agent-helpers/user-facing-text.js";
 import { logVerbose } from "../../globals.js";
 import { stripHeartbeatToken } from "../heartbeat.js";
 import {
@@ -24,8 +25,8 @@ type AgentTurnPresentation = {
   normalizeStreamingText: (payload: ReplyPayload) => { text?: string; skip: boolean };
   startPresentationWhileTyping: (
     typingPromise: Promise<void>,
-    startPresentation: () => void | Promise<void>,
-  ) => Promise<void>;
+    startPresentation: () => boolean | void | Promise<boolean | void>,
+  ) => Promise<boolean | void>;
   blockReplyHandler: ReturnType<typeof createBlockReplyDeliveryHandler> | undefined;
 };
 
@@ -79,7 +80,11 @@ export function createAgentTurnPresentation(params: {
     if (!text) {
       return { skip: true };
     }
-    const sanitized = sanitizeUserFacingText(text, { errorContext });
+    const conversationContext =
+      params.turn.sessionCtx.agentText ?? params.turn.sessionCtx.BodyForAgent;
+    const sanitized = errorContext
+      ? renderUserFacingText(text, { errorContext: true, conversationContext, streaming: true })
+      : sanitizeUserFacingText(text, { conversationContext, streaming: true });
     return sanitized.trim() ? { text: sanitized, skip: false } : { skip: true };
   };
 
@@ -93,9 +98,9 @@ export function createAgentTurnPresentation(params: {
 
   const startPresentationWhileTyping = async (
     typingPromise: Promise<void>,
-    startPresentation: () => void | Promise<void>,
+    startPresentation: () => boolean | void | Promise<boolean | void>,
   ) => {
-    let presentationPromise: void | Promise<void>;
+    let presentationPromise: boolean | void | Promise<boolean | void>;
     try {
       presentationPromise = startPresentation();
     } catch (err) {
@@ -103,7 +108,8 @@ export function createAgentTurnPresentation(params: {
       void typingPromise.catch(() => undefined);
       throw err;
     }
-    await Promise.all([typingPromise, presentationPromise]);
+    const [, result] = await Promise.all([typingPromise, presentationPromise]);
+    return result;
   };
 
   const blockReplyPipeline = params.turn.blockReplyPipeline;

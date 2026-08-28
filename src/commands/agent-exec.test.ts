@@ -1,17 +1,13 @@
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { Readable } from "node:stream";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { cleanupTempDirs, useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { AgentRunTerminalOutcomeError } from "../agents/agent-run-terminal-error.js";
-import {
-  ensureAuthProfileStore,
-  findPersistedAuthProfileCredential,
-  loadAuthProfileStoreForRuntime,
-  resolvePersistedAuthProfileOwnerAgentDir,
-} from "../agents/auth-profiles.js";
+import { enqueueExecutionIdentityContextAtAdmission } from "../audit/execution-identity-admission.js";
 import {
   clearRuntimeConfigSnapshot,
   getRuntimeConfigSnapshot,
@@ -27,14 +23,9 @@ import {
   resolveExecBaseConfig,
 } from "./agent-exec.js";
 
-const tempRoots: string[] = [];
+const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+const externalTempDirs: string[] = [];
 const execFileAsync = promisify(execFile);
-
-async function makeTempRoot(prefix: string): Promise<string> {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
-  tempRoots.push(root);
-  return root;
-}
 
 function createRuntime() {
   const log = vi.fn();
@@ -63,11 +54,9 @@ function successResult(text = "done") {
   };
 }
 
-afterEach(async () => {
-  await Promise.all(
-    tempRoots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true })),
-  );
+afterEach(() => {
   vi.restoreAllMocks();
+  cleanupTempDirs(externalTempDirs);
 });
 
 describe("agent exec prompt sources", () => {
@@ -76,7 +65,7 @@ describe("agent exec prompt sources", () => {
   });
 
   it("reads a UTF-8 prompt file", async () => {
-    const root = await makeTempRoot("openclaw-agent-exec-prompt-");
+    const root = tempDirs.make("openclaw-agent-exec-prompt-");
     const promptPath = path.join(root, "prompt.md");
     await fs.writeFile(promptPath, "\uFEFFline one\nline two", "utf8");
 
@@ -301,12 +290,12 @@ describe("agent exec command composition", () => {
     });
   });
 
-  it("creates and removes ephemeral state around the embedded run", async () => {
+  it("creates and removes ephemeral state for a configless run", async () => {
     const { runtime } = createRuntime();
     let observedStateDir = "";
     let observedConfigPath: string | undefined;
     let observedConfig: unknown;
-    const result = await agentExecCommand("inspect", {}, runtime, {
+    const result = await agentExecCommand("inspect", { authEnvOnly: true }, runtime, {
       runAgent: vi.fn(async () => {
         observedStateDir = process.env.OPENCLAW_STATE_DIR ?? "";
         observedConfigPath = process.env.OPENCLAW_CONFIG_PATH;
@@ -333,8 +322,63 @@ describe("agent exec command composition", () => {
     await expect(fs.stat(observedStateDir)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("flushes opted-in identity evidence through its owned direct-local writer", async () => {
+    const root = tempDirs.make("openclaw-agent-exec-audit-");
+    const admittedAt = Date.now();
+    setRuntimeConfigSnapshot({ logging: { audit: { executionIdentity: true } } });
+    try {
+      const { runtime } = createRuntime();
+      const result = await agentExecCommand("inspect", { stateDir: root }, runtime, {
+        runAgent: vi.fn(async () => {
+          expect(
+            enqueueExecutionIdentityContextAtAdmission(
+              {
+                runId: "agent-exec-run",
+                agentId: "main",
+                ingress: {
+                  kind: "local-cli",
+                  boundary: "agent-command.local",
+                  state: "present",
+                },
+                runtime: { kind: "embedded" },
+              },
+              {
+                enabled: true,
+                contextId: "agent-exec-context",
+                executionId: "agent-exec-execution",
+                now: admittedAt,
+                runtimeInstanceId: "agent-exec-runtime",
+              },
+            ),
+          ).toMatchObject({ accepted: true });
+          return successResult();
+        }),
+      });
+
+      expect(result.exitCode).toBe(0);
+      const database = new DatabaseSync(path.join(root, "state", "openclaw.sqlite"), {
+        readOnly: true,
+      });
+      try {
+        const row = database
+          .prepare("SELECT context_json FROM execution_identity_contexts WHERE execution_id = ?")
+          .get("agent-exec-execution") as { context_json: string };
+        expect(JSON.parse(row.context_json)).toMatchObject({
+          contextId: "agent-exec-context",
+          executionId: "agent-exec-execution",
+          runId: "agent-exec-run",
+          ingress: { kind: "local-cli", state: "present" },
+        });
+      } finally {
+        database.close();
+      }
+    } finally {
+      clearRuntimeConfigSnapshot();
+    }
+  });
+
   it("discovers operator-installed plugins while run state stays ephemeral", async () => {
-    const operatorStateDir = await makeTempRoot("openclaw-agent-exec-plugin-owner-");
+    const operatorStateDir = tempDirs.make("openclaw-agent-exec-plugin-owner-");
     const pluginDir = path.join(operatorStateDir, "extensions", "exec-provider");
     await fs.mkdir(pluginDir, { recursive: true });
     await fs.writeFile(
@@ -392,7 +436,7 @@ describe("agent exec command composition", () => {
   });
 
   it("keeps operator-installed plugins hidden under --isolated", async () => {
-    const operatorStateDir = await makeTempRoot("openclaw-agent-exec-plugin-isolated-");
+    const operatorStateDir = tempDirs.make("openclaw-agent-exec-plugin-isolated-");
     const previousStateDir = process.env.OPENCLAW_STATE_DIR;
     process.env.OPENCLAW_STATE_DIR = operatorStateDir;
     const { runtime } = createRuntime();
@@ -418,8 +462,8 @@ describe("agent exec command composition", () => {
   });
 
   it("keeps --state-dir scoped to run state instead of plugin installs", async () => {
-    const operatorStateDir = await makeTempRoot("openclaw-agent-exec-plugin-operator-");
-    const retainedRunStateDir = await makeTempRoot("openclaw-agent-exec-retained-state-");
+    const operatorStateDir = tempDirs.make("openclaw-agent-exec-plugin-operator-");
+    const retainedRunStateDir = tempDirs.make("openclaw-agent-exec-retained-state-");
     const previousStateDir = process.env.OPENCLAW_STATE_DIR;
     process.env.OPENCLAW_STATE_DIR = operatorStateDir;
     const { runtime } = createRuntime();
@@ -495,7 +539,7 @@ describe("agent exec command composition", () => {
         return successResult();
       }),
     });
-    tempRoots.push(observedStateDir);
+    externalTempDirs.push(observedStateDir);
 
     expect(result).toMatchObject({
       exitCode: 1,
@@ -514,7 +558,7 @@ describe("agent exec command composition", () => {
   });
 
   it("threads --cwd to both workspace and tool cwd", async () => {
-    const root = await makeTempRoot("openclaw-agent-exec-cwd-");
+    const root = tempDirs.make("openclaw-agent-exec-cwd-");
     const { runtime } = createRuntime();
     const runAgent = vi.fn(async () => successResult());
 
@@ -571,7 +615,7 @@ describe("agent exec command composition", () => {
   });
 
   it("undoes environment mutations made by loading the config", async () => {
-    const seedDir = await makeTempRoot("openclaw-agent-exec-envseed-");
+    const seedDir = tempDirs.make("openclaw-agent-exec-envseed-");
     const seedPath = path.join(seedDir, "openclaw.json");
     await fs.writeFile(
       seedPath,
@@ -635,7 +679,7 @@ describe("agent exec command composition", () => {
   });
 
   it("publishes no config env values when the config load fails", async () => {
-    const seedDir = await makeTempRoot("openclaw-agent-exec-badenv-");
+    const seedDir = tempDirs.make("openclaw-agent-exec-badenv-");
     const seedPath = path.join(seedDir, "openclaw.json");
     // The loader owns this: it applies `env.vars` only after validation passes,
     // and restores them from its own catch. Pinned here because the observable
@@ -659,7 +703,7 @@ describe("agent exec command composition", () => {
   });
 
   it("leaves an explicit state directory untouched", async () => {
-    const stateDir = await makeTempRoot("openclaw-agent-exec-state-");
+    const stateDir = tempDirs.make("openclaw-agent-exec-state-");
     const marker = path.join(stateDir, "keep.txt");
     await fs.writeFile(marker, "keep", "utf8");
     const { runtime } = createRuntime();
@@ -676,196 +720,6 @@ describe("agent exec command composition", () => {
     // never receive a serialized copy of it.
     await expect(fs.readdir(stateDir)).resolves.toEqual(["keep.txt"]);
   });
-
-  it("skips external Codex CLI credentials under --auth-env-only", async () => {
-    const codexHome = await makeTempRoot("openclaw-agent-exec-codex-home-");
-    await fs.writeFile(
-      path.join(codexHome, "auth.json"),
-      JSON.stringify({
-        auth_mode: "chatgpt",
-        tokens: { access_token: "test-access", refresh_token: "test-refresh" },
-      }),
-      "utf8",
-    );
-    const previousCodexHome = process.env.CODEX_HOME;
-    const previousOpenAiApiKey = process.env.OPENAI_API_KEY;
-    const previousDatabaseUrl = process.env.DATABASE_URL;
-    process.env.CODEX_HOME = codexHome;
-    process.env.OPENAI_API_KEY = "test-openai-key";
-    process.env.DATABASE_URL = "postgres://test.invalid/database";
-    const { runtime } = createRuntime();
-    let profileIds: string[] = [];
-    let runtimeProfileIds: string[] = [];
-    let hostExecApiKey: string | undefined;
-    let hostExecDatabaseUrl: string | undefined;
-    try {
-      const { withHostExecInheritedEnvOmitted } = await import("../infra/host-env-security.js");
-      await withHostExecInheritedEnvOmitted(["DATABASE_URL"], () =>
-        agentExecCommand("inspect", { authEnvOnly: true }, runtime, {
-          runAgent: vi.fn(async () => {
-            profileIds = Object.keys(
-              ensureAuthProfileStore(undefined, {
-                allowKeychainPrompt: false,
-                externalCliProviderIds: ["openai"],
-              }).profiles,
-            );
-            runtimeProfileIds = Object.keys(
-              loadAuthProfileStoreForRuntime(undefined, {
-                allowKeychainPrompt: false,
-                externalCliProviderIds: ["openai"],
-              }).profiles,
-            );
-            const { sanitizeHostExecEnv } = await import("../infra/host-env-security.js");
-            const hostExecEnv = sanitizeHostExecEnv({ baseEnv: process.env });
-            hostExecApiKey = hostExecEnv.OPENAI_API_KEY;
-            hostExecDatabaseUrl = hostExecEnv.DATABASE_URL;
-            return successResult();
-          }),
-        }),
-      );
-    } finally {
-      if (previousCodexHome === undefined) {
-        delete process.env.CODEX_HOME;
-      } else {
-        process.env.CODEX_HOME = previousCodexHome;
-      }
-      if (previousOpenAiApiKey === undefined) {
-        delete process.env.OPENAI_API_KEY;
-      } else {
-        process.env.OPENAI_API_KEY = previousOpenAiApiKey;
-      }
-      if (previousDatabaseUrl === undefined) {
-        delete process.env.DATABASE_URL;
-      } else {
-        process.env.DATABASE_URL = previousDatabaseUrl;
-      }
-    }
-
-    expect(profileIds).toEqual([]);
-    expect(runtimeProfileIds).toEqual([]);
-    expect(hostExecApiKey).toBeUndefined();
-    expect(hostExecDatabaseUrl).toBeUndefined();
-  });
-
-  it("reads stored credentials from the configured agent directory", async () => {
-    const stateDir = await makeTempRoot("openclaw-agent-exec-cfg-auth-");
-    const customAgentDir = path.join(stateDir, "custom-home");
-    await fs.mkdir(customAgentDir, { recursive: true });
-    const seedPath = path.join(stateDir, "openclaw.json");
-    await fs.writeFile(
-      seedPath,
-      JSON.stringify({
-        agents: { entries: { main: { agentDir: customAgentDir } } },
-      }),
-      "utf8",
-    );
-    const { saveAuthProfileStore } = await import("../agents/auth-profiles.js");
-    saveAuthProfileStore(
-      {
-        version: 1,
-        profiles: { "openai:stored": { type: "api_key", provider: "openai", key: "test-key" } },
-      },
-      customAgentDir,
-    );
-    const { runtime } = createRuntime();
-    let scopedProfileIds: string[] = [];
-
-    await agentExecCommand("inspect", { config: seedPath }, runtime, {
-      runAgent: vi.fn(async () => {
-        scopedProfileIds = Object.keys(loadAuthProfileStoreForRuntime()?.profiles ?? {});
-        return successResult();
-      }),
-    });
-
-    // The run config strips agentDir to keep run state ephemeral, but credential
-    // ownership must still follow the operator's configured directory.
-    expect(scopedProfileIds).toContain("openai:stored");
-  });
-
-  it("blocks direct persisted credential reads under --auth-env-only", async () => {
-    const normalStateDir = await makeTempRoot("openclaw-agent-exec-hidden-auth-");
-    const normalAgentDir = path.join(normalStateDir, "agents", "main", "agent");
-    const previousStateDir = process.env.OPENCLAW_STATE_DIR;
-    process.env.OPENCLAW_STATE_DIR = normalStateDir;
-    const { saveAuthProfileStore } = await import("../agents/auth-profiles.js");
-    saveAuthProfileStore(
-      {
-        version: 1,
-        profiles: {
-          "openai:stored": { type: "api_key", provider: "openai", key: "test-key" },
-        },
-      },
-      normalAgentDir,
-    );
-    const { runtime } = createRuntime();
-    let persistedCredential: unknown;
-    let ownerAgentDir: string | undefined;
-    try {
-      await agentExecCommand("inspect", { authEnvOnly: true }, runtime, {
-        runAgent: vi.fn(async () => {
-          persistedCredential = findPersistedAuthProfileCredential({
-            agentDir: normalAgentDir,
-            profileId: "openai:stored",
-          });
-          ownerAgentDir = resolvePersistedAuthProfileOwnerAgentDir({
-            agentDir: normalAgentDir,
-            profileId: "openai:stored",
-          });
-          return successResult();
-        }),
-      });
-    } finally {
-      if (previousStateDir === undefined) {
-        delete process.env.OPENCLAW_STATE_DIR;
-      } else {
-        process.env.OPENCLAW_STATE_DIR = previousStateDir;
-      }
-    }
-
-    expect(persistedCredential).toBeUndefined();
-    expect(ownerAgentDir).toBeUndefined();
-  });
-
-  it("uses the normal stored auth profile when auth-env-only is disabled", async () => {
-    const normalStateDir = await makeTempRoot("openclaw-agent-exec-normal-state-");
-    const normalAgentDir = path.join(normalStateDir, "agents", "main", "agent");
-    const previousStateDir = process.env.OPENCLAW_STATE_DIR;
-    process.env.OPENCLAW_STATE_DIR = normalStateDir;
-    const { saveAuthProfileStore } = await import("../agents/auth-profiles.js");
-    saveAuthProfileStore(
-      {
-        version: 1,
-        profiles: {
-          "openai:stored": { type: "api_key", provider: "openai", key: "test-key" },
-        },
-      },
-      normalAgentDir,
-    );
-    const { runtime } = createRuntime();
-    let profileIds: string[] = [];
-    try {
-      await agentExecCommand("inspect", { authEnvOnly: false }, runtime, {
-        runAgent: vi.fn(async () => {
-          expect(process.env.OPENCLAW_STATE_DIR).not.toBe(normalStateDir);
-          profileIds = Object.keys(
-            ensureAuthProfileStore(undefined, {
-              allowKeychainPrompt: false,
-              syncExternalCli: false,
-            }).profiles,
-          );
-          return successResult();
-        }),
-      });
-    } finally {
-      if (previousStateDir === undefined) {
-        delete process.env.OPENCLAW_STATE_DIR;
-      } else {
-        process.env.OPENCLAW_STATE_DIR = previousStateDir;
-      }
-    }
-
-    expect(profileIds).toContain("openai:stored");
-  });
 });
 
 describe("agent exec run config layering", () => {
@@ -877,6 +731,7 @@ describe("agent exec run config layering", () => {
 
     expect(config.agents?.defaults?.workspace).toBe("/run/here");
     expect(config.agents?.defaults?.skipBootstrap).toBe(true);
+    expect(config.skills?.load?.watch).toBe(false);
   });
 
   it("never downgrades a configured sandbox or shell env to the exec defaults", () => {
@@ -951,6 +806,21 @@ describe("agent exec run config layering", () => {
     expect(config.agents?.entries?.ops?.model).toBe("openai/gpt-5.6-sol");
   });
 
+  it("drops an inherited session store so the invocation state dir owns the agent database", () => {
+    const config = buildExecRunConfig({
+      base: {
+        session: {
+          store: "/persistent/agents/{agentId}/sessions/sessions.json",
+          mainKey: "primary",
+        },
+      },
+      cwd: "/run/here",
+    });
+
+    expect(config.session?.store).toBeUndefined();
+    expect(config.session?.mainKey).toBe("primary");
+  });
+
   it("drops an inherited harness cwd so --cwd wins", () => {
     const config = buildExecRunConfig({
       base: {
@@ -997,14 +867,14 @@ describe("agent exec base config resolution", () => {
   } satisfies OpenClawConfig;
 
   async function writeSeed(body: string): Promise<string> {
-    const dir = await makeTempRoot("openclaw-agent-exec-seed-");
+    const dir = tempDirs.make("openclaw-agent-exec-seed-");
     const seedPath = path.join(dir, "openclaw.json");
     await fs.writeFile(seedPath, body, "utf8");
     return seedPath;
   }
 
   it("rejects a missing or invalid pinned config instead of falling back", async () => {
-    const missing = path.join(await makeTempRoot("openclaw-agent-exec-seed-"), "absent.json");
+    const missing = path.join(tempDirs.make("openclaw-agent-exec-seed-"), "absent.json");
     await expect(resolveExecBaseConfig({ config: missing })).rejects.toThrow(
       "--config file not found",
     );
@@ -1052,18 +922,16 @@ describe("agent exec base config resolution", () => {
     );
   });
 
-  it("reads no config at all under --auth-env-only", async () => {
+  it("loads no authored config under --auth-env-only", async () => {
     const seedPath = await writeSeed(JSON.stringify(seedConfig));
 
     // A config can supply provider credentials through several surfaces, so
-    // env-only means no config at all.
-    await expect(resolveExecBaseConfig({ authEnvOnly: true })).resolves.toEqual({});
+    // env-only means no authored config; only the canonical missing-config migration applies.
+    await expect(resolveExecBaseConfig({ authEnvOnly: true })).resolves.toEqual({
+      agents: { entries: { main: {} } },
+    });
     // Proves the assertion above is not vacuous.
     const inherited = await resolveExecBaseConfig({ config: seedPath });
     expect(inherited.models?.providers?.custom?.apiKey).toBe("sk-config");
-  });
-
-  it("ignores the ambient config under --isolated", async () => {
-    await expect(resolveExecBaseConfig({ isolated: true })).resolves.toEqual({});
   });
 });

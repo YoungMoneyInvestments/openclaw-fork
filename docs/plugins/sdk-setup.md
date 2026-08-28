@@ -44,7 +44,7 @@ Your `package.json` needs an `openclaw` field that tells the plugin system what 
       "version": "1.0.0",
       "type": "module",
       "dependencies": {
-        "typebox": "1.1.39"
+        "typebox": "1.3.16"
       },
       "peerDependencies": {
         "openclaw": ">=2026.3.24-beta.2"
@@ -162,6 +162,8 @@ export const setupContract = defineChannelSetupContract({
 
 Supported field kinds are `string`, `boolean`, `integer`, `string-list`, and `choice`. Use `sensitive: true` for credentials. Each field key must equal the camelCased attribute name of its long CLI flag, including any negated form, such as `apiToken` for `--api-token`. Boolean fields may add `cli.negatedFlags` when both positive and `--no-*` forms are needed. `channel`, `account`, and the account display `name` remain the shared control envelope.
 
+For a boolean `useEnv` field, set `envVars` to the static environment variable names required by the plugin runtime. Non-interactive channel setup then rejects `--use-env` before writing config when any declared variable is empty. Set `envVarMode: "any"` when one variable from the list is sufficient, such as an inline credential or file-path alternative. Omitting `envVars` preserves the plugin's existing validation behavior.
+
 The released `setup`/`ChannelSetupInput` adapter stays available for existing external plugins. New plugins should expose `setupContract`; OpenClaw always prefers it when both are present.
 
 | Field                                  | Type       | What it means                                                                 |
@@ -177,7 +179,7 @@ The released `setup`/`ChannelSetupInput` adapter stays available for existing ex
 | `aliases`                              | `string[]` | Extra lookup aliases for channel selection.                                   |
 | `preferOver`                           | `string[]` | Lower-priority plugin/channel ids this channel should outrank.                |
 | `systemImage`                          | `string`   | Optional icon/system-image name for channel UI catalogs.                      |
-| `selectionDocsPrefix`                  | `string`   | Prefix text before docs links in selection surfaces.                          |
+| `selectionDocsPrefix`                  | `string`   | Prefix before docs links; omit for default or use `""` to suppress it.        |
 | `selectionDocsOmitLabel`               | `boolean`  | Show the docs path directly instead of a labeled docs link in selection copy. |
 | `selectionExtras`                      | `string[]` | Extra short strings appended in selection copy.                               |
 | `markdownCapable`                      | `boolean`  | Marks the channel as markdown-capable for outbound formatting decisions.      |

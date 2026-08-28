@@ -1,4 +1,6 @@
 /** Combined session MCP runtime facade for static + requester partitions. */
+import { racePromiseWithAbortSignal } from "../infra/abort-signal.js";
+import { getSessionMcpRequestSignal } from "./agent-bundle-mcp-request-context.js";
 import type {
   McpCatalogTool,
   McpServerCatalog,
@@ -89,6 +91,7 @@ export function createCombinedSessionMcpRuntime(params: {
   let mergedSourceCatalogs: ReadonlyArray<McpToolCatalog> | null = null;
   let catalogInFlight: Promise<McpToolCatalog> | undefined;
   const serverOwner = new Map<string, SessionMcpRuntime>();
+  const requesterConnect = parts.find((part) => part.requesterConnect)?.requesterConnect;
 
   const rememberServerOwners = (catalog: McpToolCatalog, owner: SessionMcpRuntime) => {
     for (const serverName of Object.keys(catalog.servers)) {
@@ -140,8 +143,10 @@ export function createCombinedSessionMcpRuntime(params: {
   // Fresh combined facades have an empty owner map until the catalog is loaded.
   // Share one in-flight getCatalog so concurrent tool/resource calls do not fan out.
   const ownerForServer = async (serverName: string): Promise<SessionMcpRuntime> => {
+    const signal = getSessionMcpRequestSignal();
+    signal?.throwIfAborted();
     if (serverOwner.size === 0) {
-      await loadCatalog();
+      await racePromiseWithAbortSignal(loadCatalog(), signal);
     }
     const owner = serverOwner.get(serverName);
     if (owner) {
@@ -158,6 +163,7 @@ export function createCombinedSessionMcpRuntime(params: {
     workspaceDir: params.workspaceDir,
     agentDir: params.agentDir,
     configFingerprint: parts.map((part) => part.configFingerprint).join(":"),
+    ...(requesterConnect ? { requesterConnect } : {}),
     isRequesterScopedServer(serverName) {
       // Owner map is populated by the catalog load that exposed the tool.
       return serverOwner.get(serverName)?.requesterScope !== undefined;
@@ -193,6 +199,9 @@ export function createCombinedSessionMcpRuntime(params: {
         return null;
       }
       return mergeMcpToolCatalogs(peeked as McpToolCatalog[]);
+    },
+    getServerRequestTimeoutMs(serverName) {
+      return serverOwner.get(serverName)?.getServerRequestTimeoutMs?.(serverName);
     },
     markUsed() {
       lastUsedAt = Date.now();

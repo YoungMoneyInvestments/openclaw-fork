@@ -1,4 +1,5 @@
 import type { AgentMessage } from "../../agents/runtime/index.js";
+import { getCodeModeSourceAppend } from "../../agents/transcript-code-mode-source.js";
 import { redactTranscriptMessage } from "../../agents/transcript-redact.js";
 import {
   executeSqliteQuerySync,
@@ -6,21 +7,24 @@ import {
 } from "../../infra/kysely-sync.js";
 import { redactSecrets } from "../../logging/redact.js";
 import { canonicalizePersistedUserMessageMedia } from "../../media/media-facts.js";
-import type { OpenClawAgentDatabase } from "../../state/openclaw-agent-db.js";
+import {
+  deferOpenClawAgentPostCommitPublication,
+  type OpenClawAgentDatabase,
+} from "../../state/openclaw-agent-db.js";
 import type {
   TranscriptEvent,
   TranscriptMessageAppendOptions,
 } from "./session-accessor.sqlite-contract.js";
 import {
-  findSqliteTranscriptEventInDatabase,
-  loadSqliteTranscriptEventsFromDatabase,
+  findTranscriptEventInDatabase,
+  loadTranscriptEventsFromDatabase,
   readTranscriptEventId,
   readTranscriptEventMessage,
 } from "./session-accessor.sqlite-read.js";
 import { getSessionKysely, type ResolvedTranscriptScope } from "./session-accessor.sqlite-scope.js";
 import {
   advanceTranscriptMutationAtInTransaction,
-  deleteSqliteTranscriptEventsInTransaction,
+  deleteTranscriptEventsInTransaction,
   ensureTranscriptGenerationInTransaction,
   ensureTranscriptSessionRoot,
   readTranscriptGenerationInTransaction,
@@ -32,7 +36,9 @@ import {
 import {
   deleteSessionTranscriptIndexInTransaction,
   indexAppendedTranscriptEventInTransaction,
+  markSessionTranscriptIndexDirtyInTransaction,
   reconcileSessionTranscriptIndexInTransaction,
+  shouldRebuildSessionTranscriptIndexSynchronously,
 } from "./session-transcript-index.js";
 import { startSessionTranscriptIndexReconcile } from "./session-transcript-reconcile.js";
 import { createSessionTranscriptHeader } from "./transcript-header.js";
@@ -100,7 +106,12 @@ export function appendTranscriptEventInTransaction(
     options.onProjectionReconcileNeeded?.();
   }
   if (!identity) {
-    scheduleTranscriptProjectionReconcile(database, scope, projectionNeedsRebuild, options);
+    scheduleTranscriptProjectionReconcile(
+      database,
+      scope.sessionId,
+      projectionNeedsRebuild,
+      options,
+    );
     return true;
   }
   // Caller-checked appends may retain a duplicate key in the payload, but the
@@ -130,26 +141,27 @@ export function appendTranscriptEventInTransaction(
       })
       .onConflict((conflict) => conflict.columns(["session_id", "event_id"]).doNothing()),
   );
-  scheduleTranscriptProjectionReconcile(database, scope, projectionNeedsRebuild, options);
+  scheduleTranscriptProjectionReconcile(database, scope.sessionId, projectionNeedsRebuild, options);
   return true;
 }
 
 function scheduleTranscriptProjectionReconcile(
   database: OpenClawAgentDatabase,
-  scope: ResolvedTranscriptScope,
+  sessionId: string,
   projectionNeedsRebuild: boolean,
   options: { scheduleProjectionReconcile?: boolean },
 ): void {
   if (!projectionNeedsRebuild || options.scheduleProjectionReconcile === false) {
     return;
   }
-  // setImmediate in the reconcile owner runs only after this synchronous
-  // SQLite transaction commits, keeping full-tree work off the writer stack.
-  startSessionTranscriptIndexReconcile({
-    agentId: scope.agentId,
-    path: database.path,
-    preferredSessionId: scope.sessionId,
-  });
+  // Dirty state is durable: a missed post-commit kick is recovered by startup/search reconciliation.
+  deferOpenClawAgentPostCommitPublication(database, () =>
+    startSessionTranscriptIndexReconcile({
+      agentId: database.agentId,
+      path: database.path,
+      preferredSessionId: sessionId,
+    }),
+  );
 }
 
 export function appendTranscriptEventsInTransaction(
@@ -174,7 +186,7 @@ export function appendTranscriptEventsInTransaction(
   }
   if (appended > 0) {
     touchTranscriptMutationInTransaction(database, scope.sessionId);
-    scheduleTranscriptProjectionReconcile(database, scope, projectionNeedsRebuild, {});
+    scheduleTranscriptProjectionReconcile(database, scope.sessionId, projectionNeedsRebuild, {});
   }
   return appended;
 }
@@ -241,7 +253,6 @@ export function ensureTranscriptHeader(
   database: OpenClawAgentDatabase,
   scope: ResolvedTranscriptScope,
   cwd: string | undefined,
-  now: number,
 ): void {
   const db = getSessionKysely(database.db);
   const existing = executeSqliteQueryTakeFirstSync(
@@ -260,7 +271,6 @@ export function ensureTranscriptHeader(
     scope,
     createSessionTranscriptHeader({ cwd, sessionId: scope.sessionId }),
   );
-  ensureTranscriptSessionRoot(database, scope, now);
 }
 
 export function readActiveTranscriptAppendParentId(
@@ -288,7 +298,7 @@ export function readActiveTranscriptAppendParentId(
     const treeEntry = parseSessionTranscriptTreeEntry(event);
     if (!treeEntry) {
       return resolveVisibleTranscriptAppendParentId(
-        loadSqliteTranscriptEventsFromDatabase(database, sessionId),
+        loadTranscriptEventsFromDatabase(database, sessionId),
       );
     }
     if (latest.event_type !== "leaf") {
@@ -305,7 +315,7 @@ export function readActiveTranscriptAppendParentId(
     // Fall through to the tolerant full-tree resolver.
   }
   return resolveVisibleTranscriptAppendParentId(
-    loadSqliteTranscriptEventsFromDatabase(database, sessionId),
+    loadTranscriptEventsFromDatabase(database, sessionId),
   );
 }
 
@@ -329,13 +339,17 @@ export function replaceSqliteTranscriptEventsInTransaction(
     preserveSessionWindowRecency?: boolean;
   } = {},
 ): void {
+  const rebuildSynchronously =
+    events.length > 0 &&
+    shouldRebuildSessionTranscriptIndexSynchronously(database.db, resolved.sessionId, events);
   const preservedTranscriptUpdatedAt =
     options.preserveSessionWindowRecency === true
       ? readTranscriptMutationStateInTransaction(database, resolved.sessionId).updatedAt
       : undefined;
   const previousGeneration = readTranscriptGenerationInTransaction(database, resolved.sessionId);
-  const deleted = deleteSqliteTranscriptEventsInTransaction(database, resolved.sessionId);
+  const deleted = deleteTranscriptEventsInTransaction(database, resolved.sessionId);
   if (events.length === 0) {
+    deleteSessionTranscriptIndexInTransaction(database.db, resolved.sessionId);
     if (deleted || previousGeneration) {
       rotateTranscriptGenerationInTransaction(database, resolved.sessionId);
       recordTranscriptReplacementMutation(
@@ -353,6 +367,12 @@ export function replaceSqliteTranscriptEventsInTransaction(
     rotateTranscriptGenerationInTransaction(database, resolved.sessionId);
   } else {
     ensureTranscriptGenerationInTransaction(database, resolved.sessionId);
+  }
+  if (rebuildSynchronously) {
+    deleteSessionTranscriptIndexInTransaction(database.db, resolved.sessionId);
+  } else {
+    // Preserve large old FTS rows; the dirty watermark hides them until worker reconciliation.
+    markSessionTranscriptIndexDirtyInTransaction(database.db, resolved.sessionId);
   }
   let seq = 0;
   const seenEventIds = new Set<string>();
@@ -376,7 +396,11 @@ export function replaceSqliteTranscriptEventsInTransaction(
   }
   if (deleted || seq > 0) {
     recordTranscriptReplacementMutation(database, resolved.sessionId, preservedTranscriptUpdatedAt);
-    reconcileSessionTranscriptIndexInTransaction(database.db, resolved.sessionId);
+    if (rebuildSynchronously) {
+      reconcileSessionTranscriptIndexInTransaction(database.db, resolved.sessionId);
+    } else {
+      scheduleTranscriptProjectionReconcile(database, resolved.sessionId, true, {});
+    }
   }
 }
 
@@ -409,6 +433,10 @@ export function rewriteSqliteTranscriptEventRowsInTransaction(
   if (rows.length === 0) {
     return;
   }
+  const rebuildSynchronously = shouldRebuildSessionTranscriptIndexSynchronously(
+    database.db,
+    resolved.sessionId,
+  );
   const db = getSessionKysely(database.db);
   for (const row of rows) {
     const persistedEvent = canonicalizeTranscriptEventMedia(row.event);
@@ -429,12 +457,18 @@ export function rewriteSqliteTranscriptEventRowsInTransaction(
   }
   rotateTranscriptGenerationInTransaction(database, resolved.sessionId);
   touchTranscriptMutationInTransaction(database, resolved.sessionId);
-  reconcileSessionTranscriptIndexInTransaction(database.db, resolved.sessionId);
+  if (rebuildSynchronously) {
+    deleteSessionTranscriptIndexInTransaction(database.db, resolved.sessionId);
+    reconcileSessionTranscriptIndexInTransaction(database.db, resolved.sessionId);
+  } else {
+    markSessionTranscriptIndexDirtyInTransaction(database.db, resolved.sessionId);
+    scheduleTranscriptProjectionReconcile(database, resolved.sessionId, true, {});
+  }
 }
 
 // Text-only transcript repair: rewrites event_json for specific rows in place.
 // Preserves seq, created_at, session_key, and session activity recency; rotates the transcript
-// generation and rebuilds the index so readers/search pick up the new text.
+// generation and rebuilds bounded projections immediately or defers large projections.
 export function updateSqliteTranscriptEventJsonInTransaction(
   database: OpenClawAgentDatabase,
   sessionId: string,
@@ -443,6 +477,10 @@ export function updateSqliteTranscriptEventJsonInTransaction(
   if (updates.length === 0) {
     return;
   }
+  const rebuildSynchronously = shouldRebuildSessionTranscriptIndexSynchronously(
+    database.db,
+    sessionId,
+  );
   const db = getSessionKysely(database.db);
   for (const { seq, eventJson } of updates) {
     executeSqliteQuerySync(
@@ -455,8 +493,12 @@ export function updateSqliteTranscriptEventJsonInTransaction(
     );
   }
   rotateTranscriptGenerationInTransaction(database, sessionId);
-  deleteSessionTranscriptIndexInTransaction(database.db, sessionId);
-  reconcileSessionTranscriptIndexInTransaction(database.db, sessionId);
+  if (rebuildSynchronously) {
+    deleteSessionTranscriptIndexInTransaction(database.db, sessionId);
+    reconcileSessionTranscriptIndexInTransaction(database.db, sessionId);
+  } else {
+    markSessionTranscriptIndexDirtyInTransaction(database.db, sessionId);
+  }
   // Minimally advance transcript_updated_at (prev+1), NOT to now. This is a one-time maintenance
   // rewrite: bumping to now would reorder legacy sessions to the top of every recency view
   // (sqlite-history.ts orders by transcript_updated_at). But the watermark must still change,
@@ -472,6 +514,7 @@ export function updateSqliteTranscriptEventJsonInTransaction(
       strictly: true,
     });
   }
+  scheduleTranscriptProjectionReconcile(database, sessionId, !rebuildSynchronously, {});
 }
 
 export function readTranscriptIdentityByEventId(
@@ -532,7 +575,7 @@ export function readTranscriptMessageByScopedIdempotencyKey(
   if (lookup !== "scan-assistant") {
     return readTranscriptMessageByIdempotencyKey(database, scope, idempotencyKey);
   }
-  const found = findSqliteTranscriptEventInDatabase(database, scope.sessionId, (event) => {
+  const found = findTranscriptEventInDatabase(database, scope.sessionId, (event) => {
     const message = readTranscriptEventMessage(event);
     return message?.role === "assistant" && message.idempotencyKey === idempotencyKey;
   });
@@ -644,7 +687,11 @@ export function redactTranscriptMessageForStorage<TMessage>(
   options: Pick<TranscriptMessageAppendOptions<TMessage>, "config">,
 ): TMessage {
   return isTranscriptAgentMessage(message)
-    ? (redactTranscriptMessage(message, options.config) as TMessage)
+    ? (redactTranscriptMessage(
+        message,
+        options.config,
+        getCodeModeSourceAppend(options),
+      ) as TMessage)
     : redactSecrets(message);
 }
 

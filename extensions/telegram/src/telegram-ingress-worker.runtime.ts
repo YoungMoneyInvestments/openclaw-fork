@@ -89,6 +89,7 @@ function postPollError(
   port: TelegramIngressMessagePort,
   err: unknown,
   attribution: { pollerId: string; workerThreadId: number; requestSeq: number },
+  retryAfterMs?: number,
 ): void {
   if (err !== null && typeof err === "object") {
     reportedPollErrors.add(err);
@@ -99,6 +100,12 @@ function postPollError(
     ...attribution,
     message: formatErrorMessage(err),
     ...(errorCode === undefined ? {} : { errorCode }),
+    ...(errorCode === 429 &&
+    retryAfterMs !== undefined &&
+    Number.isFinite(retryAfterMs) &&
+    retryAfterMs > 0
+      ? { retryAfterMs }
+      : {}),
     finishedAt: Date.now(),
   });
 }
@@ -340,7 +347,9 @@ export async function runTelegramIngressWorkerRuntime(params: {
         }
         consecutiveEmptyPolls = 0;
         failures += 1;
-        postPollError(port, err, requestAttribution);
+        const retryAfterMs = readTelegramRetryAfterMs(err);
+        // The parent must observe the exact flood wait this worker actually honors.
+        postPollError(port, err, requestAttribution, retryAfterMs);
         // 409 must propagate to the parent: it owns duplicate-poller/webhook
         // conflict recovery. Transient Bot API errors stay local to this worker.
         if (!isRetryableTelegramApiError(err, { context: "polling" })) {
@@ -348,8 +357,7 @@ export async function runTelegramIngressWorkerRuntime(params: {
         }
         try {
           await sleepWithAbort(
-            readTelegramRetryAfterMs(err) ??
-              computeBackoff(TELEGRAM_RETRY_BACKOFF_POLICY, failures),
+            retryAfterMs ?? computeBackoff(TELEGRAM_RETRY_BACKOFF_POLICY, failures),
             stopController.signal,
             { ref: false },
           );

@@ -12,7 +12,7 @@ import {
   cleanupPluginLoaderFixturesForTest,
   EMPTY_PLUGIN_SCHEMA,
   inlineChannelPluginEntryFactorySource,
-  makeTempDir,
+  makePluginLoaderTempDir,
   resetPluginLoaderTestStateForTest,
   useNoBundledPlugins,
   writePlugin,
@@ -79,9 +79,85 @@ describe("plugin loader CLI metadata", () => {
     },
   );
 
+  it("rejects runtime access during CLI metadata registration with actionable plugin guidance", async () => {
+    useNoBundledPlugins();
+    const plugin = writePlugin({
+      id: "runtime-dependent",
+      filename: "runtime-dependent.cjs",
+      body: `module.exports = {
+  id: "runtime-dependent",
+  register(api) {
+    api.runtime.state.openSyncKeyedStore({ namespace: "example", maxEntries: 1 });
+  },
+};`,
+    });
+
+    const registry = await loadOpenClawPluginCliRegistry({
+      config: {
+        plugins: {
+          load: { paths: [plugin.file] },
+          allow: [plugin.id],
+        },
+      },
+    });
+
+    const pluginError = registry.plugins.find((entry) => entry.id === plugin.id)?.error;
+    expect(pluginError).toContain('Plugin "runtime-dependent"');
+    expect(pluginError).toContain('"cli-metadata" registration');
+    expect(pluginError).toContain("runtime is intentionally unavailable");
+    expect(pluginError).toContain("cliCommands");
+    expect(pluginError).toContain("defer runtime access out of register()");
+    expect(pluginError).not.toContain("Cannot read properties of undefined");
+  });
+
+  it("loads packaged CLI metadata beside the resolved dist entry without evaluating the heavy entry", async () => {
+    useNoBundledPlugins();
+    const pluginDir = makePluginLoaderTempDir();
+    const distDir = path.join(pluginDir, "dist");
+    const heavyMarker = path.join(pluginDir, "heavy-loaded.txt");
+    fs.mkdirSync(distDir);
+    const plugin = writePlugin({
+      id: "packaged-cli-metadata",
+      dir: pluginDir,
+      filename: "dist/index.js",
+      body: `require("node:fs").writeFileSync(${JSON.stringify(heavyMarker)}, "loaded");
+module.exports = { id: "packaged-cli-metadata", register() {} };`,
+    });
+    fs.writeFileSync(
+      path.join(pluginDir, "package.json"),
+      JSON.stringify({
+        name: "packaged-cli-metadata",
+        openclaw: { extensions: ["./dist/index.js"] },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(distDir, "cli-metadata.js"),
+      `module.exports = {
+  id: "packaged-cli-metadata",
+  register(api) {
+    api.registerCli(() => {}, {
+      descriptors: [{ name: "packaged-light", description: "Light entry", hasSubcommands: false }],
+    });
+  },
+};`,
+    );
+
+    const registry = await loadOpenClawPluginCliRegistry({
+      config: {
+        plugins: {
+          load: { paths: [pluginDir] },
+          allow: [plugin.id],
+        },
+      },
+    });
+
+    expect(fs.existsSync(heavyMarker)).toBe(false);
+    expect(registry.cliRegistrars.flatMap((entry) => entry.commands)).toContain("packaged-light");
+  });
+
   it("suppresses trust warning logs during CLI metadata loads", async () => {
     useNoBundledPlugins();
-    const stateDir = makeTempDir();
+    const stateDir = makePluginLoaderTempDir();
     const globalDir = path.join(stateDir, "extensions", "rogue");
     fs.mkdirSync(globalDir, { recursive: true });
     writePlugin({
@@ -189,7 +265,7 @@ describe("plugin loader CLI metadata", () => {
 
   it("uses the real channel entry in cli-metadata mode for CLI metadata capture", async () => {
     useNoBundledPlugins();
-    const pluginDir = makeTempDir();
+    const pluginDir = makePluginLoaderTempDir();
     const fullMarker = path.join(pluginDir, "full-loaded.txt");
     const modeMarker = path.join(pluginDir, "registration-mode.txt");
     const runtimeMarker = path.join(pluginDir, "runtime-set.txt");
@@ -294,7 +370,7 @@ module.exports = {
   });
 
   it("skips bundled channel full entries that do not provide a dedicated cli-metadata entry", async () => {
-    const bundledRoot = makeTempDir();
+    const bundledRoot = makePluginLoaderTempDir();
     const pluginDir = path.join(bundledRoot, "bundled-skip-channel");
     const fullMarker = path.join(pluginDir, "full-loaded.txt");
 
@@ -361,7 +437,7 @@ module.exports = {
   });
 
   it("prefers bundled channel cli-metadata entries over full channel entries", async () => {
-    const bundledRoot = makeTempDir();
+    const bundledRoot = makePluginLoaderTempDir();
     const pluginDir = path.join(bundledRoot, "bundled-cli-channel");
     const fullMarker = path.join(pluginDir, "full-loaded.txt");
     const cliMarker = path.join(pluginDir, "cli-loaded.txt");
@@ -453,7 +529,7 @@ module.exports = {
   });
 
   it("skips bundled non-channel full entries that do not provide a dedicated cli-metadata entry", async () => {
-    const bundledRoot = makeTempDir();
+    const bundledRoot = makePluginLoaderTempDir();
     const pluginDir = path.join(bundledRoot, "bundled-skip-provider");
     const fullMarker = path.join(pluginDir, "full-loaded.txt");
 
@@ -520,7 +596,7 @@ module.exports = {
 
   it("collects channel CLI metadata during full plugin loads", () => {
     useNoBundledPlugins();
-    const pluginDir = makeTempDir();
+    const pluginDir = makePluginLoaderTempDir();
     const modeMarker = path.join(pluginDir, "registration-mode.txt");
     const fullMarker = path.join(pluginDir, "full-loaded.txt");
 
@@ -616,7 +692,7 @@ module.exports = {
 
   it("collects channel CLI metadata during discovery plugin loads", () => {
     useNoBundledPlugins();
-    const pluginDir = makeTempDir();
+    const pluginDir = makePluginLoaderTempDir();
     const modeMarker = path.join(pluginDir, "registration-mode.txt");
     const fullMarker = path.join(pluginDir, "full-loaded.txt");
     const runtimeMarker = path.join(pluginDir, "runtime-set.txt");
@@ -723,7 +799,7 @@ module.exports = {
 
   it("can force channel runtime entries for CLI registration when setup entries exist", () => {
     useNoBundledPlugins();
-    const pluginDir = makeTempDir();
+    const pluginDir = makePluginLoaderTempDir();
     const modeMarker = path.join(pluginDir, "registration-mode.txt");
     const setupMarker = path.join(pluginDir, "setup-loaded.txt");
 
@@ -827,7 +903,7 @@ module.exports = {
   });
 
   it("sets bundled channel runtime before discovery CLI metadata registration", () => {
-    const pluginDir = makeTempDir();
+    const pluginDir = makePluginLoaderTempDir();
     const runtimeMarker = path.join(pluginDir, "runtime-set.txt");
     const channelPluginPath = path.join(pluginDir, "channel.cjs");
     const runtimePath = path.join(pluginDir, "runtime.cjs");
@@ -970,6 +1046,7 @@ module.exports = {
   id: "machine-output-cli",
   register(api) {
     api.registerCli(() => {}, {
+      commands: [" machine-output-cli ", "machine-output-cli", "additional-cli"],
       descriptors: [{
         name: "machine-output-cli",
         description: "Machine output CLI",
@@ -979,6 +1056,7 @@ module.exports = {
     });
     api.registerCli(() => {}, {
       parentPath: ["nodes"],
+      commands: ["nested-machine-output", " nested-machine-output "],
       descriptors: [{
         name: "nested-machine-output",
         description: "Nested metadata",
@@ -999,6 +1077,10 @@ module.exports = {
     const metadataRegistry = await loadOpenClawPluginCliRegistry({ cache: false, config });
     const fullRegistry = loadOpenClawPlugins({ cache: false, config });
     for (const registry of [metadataRegistry, fullRegistry]) {
+      expect(registry.cliRegistrars[0]?.commands).toEqual(["machine-output-cli", "additional-cli"]);
+      expect(
+        registry.plugins.find((entry) => entry.id === "machine-output-cli")?.cliCommands,
+      ).toEqual(["machine-output-cli", "additional-cli", "nodes nested-machine-output"]);
       const resolver = registry.cliRegistrars[0]?.descriptors[0]?.machineOutput;
       expect(
         resolver?.({ argv: ["node", "openclaw", "machine-output-cli"], stdoutIsTTY: false }),
@@ -1010,6 +1092,7 @@ module.exports = {
         }),
       ).toBe(true);
       const nested = registry.cliRegistrars.find((entry) => entry.parentPath.length > 0);
+      expect(nested?.commands).toEqual(["nested-machine-output"]);
       expect(nested?.descriptors[0]).not.toHaveProperty("machineOutput");
     }
   });

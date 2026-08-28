@@ -7,8 +7,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildXaiCatalogModels, resolveXaiCatalogEntry } from "./model-definitions.js";
 import { isModernXaiModel, resolveXaiForwardCompatModel } from "./provider-models.js";
 import { resolveFallbackXaiAuth } from "./src/tool-auth-shared.js";
+import { testing } from "./src/web-search-provider.runtime.js";
 import { requestXaiWebSearch } from "./src/web-search-shared.js";
-import { testing } from "./test-api.js";
 import { createXaiWebSearchProvider as createXaiWebSearchContractProvider } from "./web-search-contract-api.js";
 import { createXaiWebSearchProvider } from "./web-search.js";
 
@@ -39,43 +39,7 @@ vi.mock("openclaw/plugin-sdk/provider-auth-runtime", async (importOriginal) => {
   };
 });
 
-vi.mock("openclaw/plugin-sdk/provider-web-search", async (importOriginal) => {
-  const original = await importOriginal<typeof import("openclaw/plugin-sdk/provider-web-search")>();
-  return {
-    ...original,
-    postTrustedWebToolsJson: async (
-      params: {
-        url: string;
-        apiKey: string;
-        body: Record<string, unknown>;
-        extraHeaders?: Record<string, string>;
-      },
-      parseResponse: (response: Response) => Promise<unknown>,
-    ) => {
-      const response = await globalThis.fetch(params.url, {
-        method: "POST",
-        headers: {
-          ...params.extraHeaders,
-          Accept: "application/json",
-          Authorization: `Bearer ${params.apiKey}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(params.body),
-      });
-      if (!response.ok) {
-        const detail =
-          typeof response.text === "function"
-            ? await response.text()
-            : response.statusText || String(response.status);
-        throw new Error(`xAI API error (${response.status}): ${detail || response.statusText}`);
-      }
-      return await parseResponse(response);
-    },
-  };
-});
-
 const {
-  extractXaiWebSearchContent,
   resolveXaiInlineCitations,
   resolveXaiToolSearchConfig,
   resolveXaiWebSearchCredential,
@@ -776,84 +740,128 @@ describe("xai web search config resolution", () => {
       expect(error).toBeInstanceOf(Error);
       expect((error as Error).name).toBe("Error");
       expect((error as Error).cause).toBe(abort);
+      expect((error as Error & { code?: string }).code).toBe("ETIMEDOUT");
     }
   });
-});
 
-describe("xai web search response parsing", () => {
-  it("extracts content from Responses API message blocks", () => {
-    const result = extractXaiWebSearchContent({
-      output: [
-        {
-          type: "message",
-          content: [{ type: "output_text", text: "hello from output" }],
-        },
-      ],
+  it("bounds remote xAI web-search answer text without truncating shared code execution", async () => {
+    const mockFetch = vi.fn(async () =>
+      jsonResponse({ output_text: "x".repeat(25_000), citations: [] }),
+    );
+    global.fetch = withFetchPreconnect(mockFetch);
+    const tool = requireXaiWebSearchTool({
+      config: xaiPluginConfig({ webSearch: { apiKey: "xai-bounded-key" } }),
     });
-    expect(result.text).toBe("hello from output");
-    expect(result.annotationCitations).toStrictEqual([]);
+
+    const result = await tool.execute({ query: "bounded canonical xAI answer" });
+
+    expect(result.truncated).toBe(true);
+    expect(String(result.content).length).toBeLessThan(22_000);
   });
 
-  it("extracts url_citation annotations from content blocks", () => {
-    const result = extractXaiWebSearchContent({
-      output: [
-        {
-          type: "message",
-          content: [
-            {
-              type: "output_text",
-              text: "hello with citations",
-              annotations: [
-                { type: "url_citation", url: "https://example.com/a" },
-                { type: "url_citation", url: "https://example.com/b" },
-                { type: "url_citation", url: "https://example.com/a" },
-              ],
-            },
-          ],
-        },
-      ],
+  it("bounds actual generic xAI provider content after special-token expansion", async () => {
+    const mockFetch = vi.fn(async () =>
+      jsonResponse({ output_text: "<s>".repeat(6_666), citations: [] }),
+    );
+    global.fetch = withFetchPreconnect(mockFetch);
+    const tool = requireXaiWebSearchTool({
+      config: xaiPluginConfig({ webSearch: { apiKey: "xai-sanitized-key" } }),
     });
-    expect(result.text).toBe("hello with citations");
-    expect(result.annotationCitations).toEqual(["https://example.com/a", "https://example.com/b"]);
+
+    const result = await tool.execute({ query: "bounded sanitized xAI answer" });
+
+    expect(result.truncated).toBe(true);
+    expect(String(result.content).length).toBeLessThan(20_200);
+    expect(String(result.content)).not.toContain("<s>");
   });
 
-  it("falls back to deprecated output_text", () => {
-    const result = extractXaiWebSearchContent({ output_text: "hello from output_text" });
-    expect(result.text).toBe("hello from output_text");
-    expect(result.annotationCitations).toStrictEqual([]);
-  });
-
-  it("returns undefined text when no content found", () => {
-    const result = extractXaiWebSearchContent({});
-    expect(result.text).toBeUndefined();
-    expect(result.annotationCitations).toStrictEqual([]);
-  });
-
-  it("extracts output_text blocks directly in output array", () => {
-    const result = extractXaiWebSearchContent({
-      output: [
-        { type: "web_search_call" },
-        {
-          type: "output_text",
-          text: "direct output text",
-          annotations: [{ type: "url_citation", url: "https://example.com/direct" }],
-        },
-      ],
+  it("preserves caller abort identity through the registered generic xAI provider", async () => {
+    const controller = new AbortController();
+    const reason = new DOMException("operator cancelled generic search", "AbortError");
+    let transportSignal: AbortSignal | undefined;
+    const mockFetch = vi.fn(
+      async (_url: unknown, init?: RequestInit) =>
+        await new Promise<Response>((_resolve, reject) => {
+          transportSignal = init?.signal ?? undefined;
+          transportSignal?.addEventListener("abort", () => reject(reason), {
+            once: true,
+          });
+          queueMicrotask(() => controller.abort(reason));
+        }),
+    );
+    global.fetch = withFetchPreconnect(mockFetch);
+    const tool = requireXaiWebSearchTool({
+      config: xaiPluginConfig({ webSearch: { apiKey: "xai-cancel-key" } }),
     });
-    expect(result.text).toBe("direct output text");
-    expect(result.annotationCitations).toEqual(["https://example.com/direct"]);
+
+    await expect(
+      tool.execute({ query: "generic xAI provider cancellation" }, { signal: controller.signal }),
+    ).rejects.toBe(reason);
+
+    expect(mockFetch).toHaveBeenCalledOnce();
+    expect(transportSignal?.reason).toBe(reason);
+  });
+
+  it("does not cache a Grok result completed after caller cancellation", async () => {
+    const controller = new AbortController();
+    const reason = new Error("Grok search cancelled after response");
+    const mockFetch = vi
+      .fn()
+      .mockImplementationOnce(async () => {
+        controller.abort(reason);
+        return xaiAnswerResponse("Cancelled Grok answer");
+      })
+      .mockResolvedValueOnce(xaiAnswerResponse("Recovered Grok answer"));
+    global.fetch = withFetchPreconnect(mockFetch);
+    const tool = requireXaiWebSearchTool({
+      config: xaiPluginConfig({ webSearch: { apiKey: "xai-cancel-cache-key" } }),
+    });
+    const query = "unique Grok late-cancel cache regression";
+
+    await expect(tool.execute({ query }, { signal: controller.signal })).rejects.toBe(reason);
+    const recovered = await tool.execute({ query });
+
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(recovered.content).toContain("Recovered Grok answer");
+  });
+
+  it("does not contact the generic xAI provider when the caller is already cancelled", async () => {
+    const mockFetch = installXaiWebSearchFetch();
+    const controller = new AbortController();
+    const reason = new Error("generic xAI request cancelled before billing");
+    controller.abort(reason);
+    const tool = requireXaiWebSearchTool({
+      config: xaiPluginConfig({ webSearch: { apiKey: "xai-cancel-key" } }),
+    });
+
+    await expect(
+      tool.execute({ query: "cancelled generic request" }, { signal: controller.signal }),
+    ).rejects.toBe(reason);
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 });
 
 describe("xai provider models", () => {
   it("publishes only current selectable chat models newest first", () => {
     expect(buildXaiCatalogModels().map((model) => model.id)).toEqual([
+      "grok-4.6",
       "grok-4.5",
       "grok-build-0.1",
       "grok-4.3",
       "grok-4.20-0309-reasoning",
       "grok-4.20-0309-non-reasoning",
     ]);
+  });
+
+  it("publishes Grok 4.6 with its current metadata", () => {
+    expectCatalogEntry("grok-4.6", {
+      id: "grok-4.6",
+      reasoning: true,
+      input: ["text", "image"],
+      contextWindow: 500_000,
+      maxTokens: 64_000,
+      cost: { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 },
+    });
   });
 
   it("publishes Grok 4.5 with its current metadata", () => {
@@ -863,7 +871,7 @@ describe("xai provider models", () => {
       input: ["text", "image"],
       contextWindow: 500_000,
       maxTokens: 64_000,
-      cost: { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 },
+      cost: { input: 2, output: 6, cacheRead: 0.3, cacheWrite: 0 },
     });
   });
 
@@ -874,7 +882,7 @@ describe("xai provider models", () => {
       input: ["text", "image"],
       contextWindow: 500_000,
       maxTokens: 64_000,
-      cost: { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 },
+      cost: { input: 2, output: 6, cacheRead: 0.3, cacheWrite: 0 },
     });
   });
 

@@ -1,16 +1,25 @@
-import { chromium, type Browser, type BrowserContext } from "playwright";
-import { afterAll, afterEach, beforeAll, describe } from "vitest";
+import { chromium, type Browser, type BrowserContext, type Locator, type Page } from "playwright";
+import { afterAll, afterEach, beforeAll, describe, expect } from "vitest";
 import {
   canRunPlaywrightChromium,
+  controlUiE2eWaitTimeoutMs,
   resolvePlaywrightChromiumExecutablePath,
   startControlUiE2eServer,
   type ControlUiE2eServer,
 } from "../test-helpers/control-ui-e2e.ts";
 
 type ControlUiE2eSuiteOptions = {
+  browserLaunchOptions?: Omit<NonNullable<Parameters<typeof chromium.launch>[0]>, "executablePath">;
   name: string;
-  unavailableMessage: (executablePath: string) => string;
+  startServer?: () => Promise<ControlUiE2eServer>;
+  startServerBeforeBrowser?: boolean;
   trackBrowserContexts?: boolean;
+  unavailableMessage?: (executablePath: string) => string;
+};
+
+type ControlUiE2ePage = {
+  context: BrowserContext;
+  page: Page;
 };
 
 type ControlUiE2eSuite = {
@@ -19,7 +28,59 @@ type ControlUiE2eSuite = {
   closeBrowserContext: (context: BrowserContext) => Promise<void>;
   define: (defineTests: () => void) => void;
   newBrowserContext: (options: Parameters<Browser["newContext"]>[0]) => Promise<BrowserContext>;
+  withPage: <T>(
+    options: Parameters<Browser["newContext"]>[0],
+    run: (fixture: ControlUiE2ePage) => Promise<T>,
+  ) => Promise<T>;
 };
+
+/* The shared title tooltip (components/tooltip-title.ts) lifts a hovered or
+   focused element's `title` into its overlay and blanks the attribute until
+   pointer-leave/focusout, so elements that can sit under the pointer or hold
+   focus race a raw getAttribute("title") read. Read the lifted overlay
+   description when the attribute is blank. */
+export function tooltipTitleText(item: Locator) {
+  return item.evaluate((element) => {
+    const title = element.getAttribute("title");
+    if (title) {
+      return title;
+    }
+    // The overlay describes the first interactive descendant when the titled
+    // row itself is not describable (tooltip.ts resolveDescribedElement), so
+    // link rows carry the description on their nested anchor.
+    const described = element.hasAttribute("aria-describedby")
+      ? element
+      : (element.querySelector("[aria-describedby]") ?? element);
+    const root = described.getRootNode();
+    const scope = root instanceof ShadowRoot ? root : described.ownerDocument;
+    return (described.getAttribute("aria-describedby") ?? "")
+      .split(/\s+/u)
+      .map((id) => scope.getElementById(id)?.textContent?.trim() ?? "")
+      .filter(Boolean)
+      .join(" ");
+  });
+}
+
+export async function holdModuleResponse(page: Page, module: RegExp) {
+  let release!: () => void;
+  let requested!: (url: string) => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const request = new Promise<string>((resolve) => {
+    requested = resolve;
+  });
+  let requests = 0;
+  await page.route(module, async (route) => {
+    requests += 1;
+    const response = await route.fetch();
+    expect(response.status()).toBe(200);
+    requested(route.request().url());
+    await gate;
+    await route.fulfill({ response });
+  });
+  return { request, release, requests: () => requests };
+}
 
 export function createControlUiE2eSuite(options: ControlUiE2eSuiteOptions): ControlUiE2eSuite {
   const chromiumExecutablePath = resolvePlaywrightChromiumExecutablePath(chromium.executablePath());
@@ -37,6 +98,18 @@ export function createControlUiE2eSuite(options: ControlUiE2eSuiteOptions): Cont
   };
   const closeOpenBrowserContexts = async (): Promise<void> => {
     await Promise.all([...openBrowserContexts].map((context) => closeBrowserContext(context)));
+  };
+  const newBrowserContext = async (
+    contextOptions: Parameters<Browser["newContext"]>[0],
+  ): Promise<BrowserContext> => {
+    if (!browser) {
+      throw new Error("Control UI E2E browser accessed before suite setup");
+    }
+    const context = await browser.newContext(contextOptions);
+    // Harness owns the wait budget; per-test setDefaultTimeout sprinkles defeat CI scaling.
+    context.setDefaultTimeout(controlUiE2eWaitTimeoutMs);
+    openBrowserContexts.add(context);
+    return context;
   };
 
   return {
@@ -56,15 +129,32 @@ export function createControlUiE2eSuite(options: ControlUiE2eSuiteOptions): Cont
     define(defineTests) {
       describeControlUiE2e(options.name, () => {
         beforeAll(async () => {
-          if (!chromiumAvailable) {
+          if (!chromiumAvailable && options.unavailableMessage) {
             throw new Error(options.unavailableMessage(chromiumExecutablePath));
           }
-          browser = await chromium.launch({ executablePath: chromiumExecutablePath });
-          try {
-            server = await startControlUiE2eServer();
-          } catch (error) {
-            await browser.close();
-            throw error;
+          const startServer = options.startServer ?? startControlUiE2eServer;
+          if (options.startServerBeforeBrowser) {
+            server = await startServer();
+            try {
+              browser = await chromium.launch({
+                ...options.browserLaunchOptions,
+                executablePath: chromiumExecutablePath,
+              });
+            } catch (error) {
+              await server.close();
+              throw error;
+            }
+          } else {
+            browser = await chromium.launch({
+              ...options.browserLaunchOptions,
+              executablePath: chromiumExecutablePath,
+            });
+            try {
+              server = await startServer();
+            } catch (error) {
+              await browser.close();
+              throw error;
+            }
           }
         });
 
@@ -81,13 +171,15 @@ export function createControlUiE2eSuite(options: ControlUiE2eSuiteOptions): Cont
         defineTests();
       });
     },
-    async newBrowserContext(contextOptions) {
-      if (!browser) {
-        throw new Error("Control UI E2E browser accessed before suite setup");
+    newBrowserContext,
+    async withPage(contextOptions, run) {
+      const context = await newBrowserContext(contextOptions);
+      try {
+        const page = await context.newPage();
+        return await run({ context, page });
+      } finally {
+        await closeBrowserContext(context);
       }
-      const context = await browser.newContext(contextOptions);
-      openBrowserContexts.add(context);
-      return context;
     },
   };
 }

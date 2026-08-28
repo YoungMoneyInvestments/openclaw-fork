@@ -28,6 +28,32 @@ describe("createChannelOutboundRuntimeSend", () => {
     return params;
   }
 
+  it.each(["discord", "telegram"] as const)(
+    "classifies unavailable %s adapters as definitely not dispatched",
+    async (channelId) => {
+      mocks.loadChannelOutboundAdapter.mockResolvedValue(undefined);
+      const unavailableMessage = `${channelId} outbound adapter is unavailable.`;
+
+      const { createChannelOutboundRuntimeSend } = await import("./channel-outbound-send.js");
+      const runtimeSend = createChannelOutboundRuntimeSend({
+        channelId,
+        unavailableMessage,
+      });
+
+      const error = await runtimeSend
+        .sendMessage("target", "hello", { cfg: {} })
+        .catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(PlatformMessageNotDispatchedError);
+      expect(error).toMatchObject({
+        name: "PlatformMessageNotDispatchedError",
+        message: unavailableMessage,
+        cause: expect.objectContaining({
+          message: unavailableMessage,
+        }),
+      });
+    },
+  );
+
   it("routes media sends through sendMedia and preserves media access", async () => {
     const sendMedia = vi.fn(async () => ({ channel: "whatsapp", messageId: "wa-1" }));
     mocks.loadChannelOutboundAdapter.mockResolvedValue({

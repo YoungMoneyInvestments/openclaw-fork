@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createBrowserRouteApp, createBrowserRouteResponse } from "./test-helpers.js";
 import type { BrowserRequest } from "./types.js";
 
+const tabLookup = vi.hoisted(() => vi.fn());
+
 const routeState = vi.hoisted(() => ({
   profileCtx: {
     profile: {
@@ -15,12 +17,13 @@ const routeState = vi.hoisted(() => ({
       targetId: "7",
       url: "http://127.0.0.1:8080/admin",
       wsUrl: "ws://127.0.0.1/devtools/page/7",
+      wsLookup: tabLookup,
     })),
   },
 }));
 
 const cdpMocks = vi.hoisted(() => ({
-  getMainFrameDocumentIdentityViaCdp: vi.fn<() => Promise<string | undefined>>(
+  getMainFrameDocumentIdentityViaCdp: vi.fn<(_opts?: unknown) => Promise<string | undefined>>(
     async () => "cdp:test-document",
   ),
   snapshotAria: vi.fn(async () => ({
@@ -100,17 +103,17 @@ vi.mock("./agent.shared.js", () => ({
 
 const { registerBrowserAgentSnapshotRoutes } = await import("./agent.snapshot.js");
 
-function getSnapshotGetHandler() {
+function getSnapshotGetHandler(
+  state = {
+    resolved: {
+      actionTimeoutMs: 60_000,
+      extraArgs: [],
+      ssrfPolicy: { dangerouslyAllowPrivateNetwork: false },
+    },
+  },
+) {
   const { app, getHandlers } = createBrowserRouteApp();
-  registerBrowserAgentSnapshotRoutes(app, {
-    state: () => ({
-      resolved: {
-        actionTimeoutMs: 60_000,
-        extraArgs: [],
-        ssrfPolicy: { dangerouslyAllowPrivateNetwork: false },
-      },
-    }),
-  } as never);
+  registerBrowserAgentSnapshotRoutes(app, { state: () => state } as never);
   const handler = getHandlers.get("/snapshot");
   expect(handler).toBeTypeOf("function");
   return handler;
@@ -122,6 +125,7 @@ describe("local-managed browser snapshot routes", () => {
     cdpMocks.getMainFrameDocumentIdentityViaCdp.mockReset().mockResolvedValue("cdp:test-document");
     cdpMocks.snapshotAria.mockClear();
     cdpMocks.snapshotRoleViaCdp.mockClear();
+    tabLookup.mockClear();
     navigationGuardMocks.assertBrowserNavigationResultAllowed.mockClear();
     navigationGuardMocks.withBrowserNavigationPolicy.mockClear();
   });
@@ -193,6 +197,22 @@ describe("local-managed browser snapshot routes", () => {
     });
   });
 
+  it("uses the tab lookup pin when reading delta document identity via CDP", async () => {
+    navigationGuardMocks.assertBrowserNavigationResultAllowed.mockResolvedValue(undefined);
+    const handler = getSnapshotGetHandler();
+    const response = createBrowserRouteResponse();
+
+    await handler?.({ params: {}, query: { format: "ai", interactive: "true" } }, response.res);
+
+    expect(response.statusCode).toBe(200);
+    expect(cdpMocks.getMainFrameDocumentIdentityViaCdp).toHaveBeenCalledWith(
+      expect.objectContaining({
+        wsUrl: "ws://127.0.0.1/devtools/page/7",
+        lookup: tabLookup,
+      }),
+    );
+  });
+
   it("disables deltas when no stable document identity is available", async () => {
     navigationGuardMocks.assertBrowserNavigationResultAllowed.mockResolvedValue(undefined);
     cdpMocks.getMainFrameDocumentIdentityViaCdp.mockResolvedValue(undefined);
@@ -222,6 +242,31 @@ describe("local-managed browser snapshot routes", () => {
 
     const secondCall = cdpMocks.snapshotRoleViaCdp.mock.calls[1]?.[0];
     expect(secondCall).toMatchObject({
+      delta: { mode: "role", previousKeys: expect.any(Set) },
+    });
+  });
+
+  it("reuses same-document delta keys across request contexts in one browser runtime", async () => {
+    navigationGuardMocks.assertBrowserNavigationResultAllowed.mockResolvedValue(undefined);
+    const state = {
+      resolved: {
+        actionTimeoutMs: 60_000,
+        extraArgs: [],
+        ssrfPolicy: { dangerouslyAllowPrivateNetwork: false },
+      },
+    };
+    const firstHandler = getSnapshotGetHandler(state);
+    const secondHandler = getSnapshotGetHandler(state);
+    const first = createBrowserRouteResponse();
+    const second = createBrowserRouteResponse();
+    const request = { params: {}, query: { format: "ai", interactive: "true" } };
+
+    await firstHandler?.(request, first.res);
+    await secondHandler?.(request, second.res);
+
+    expect(first.statusCode).toBe(200);
+    expect(second.statusCode).toBe(200);
+    expect(cdpMocks.snapshotRoleViaCdp.mock.calls[1]?.[0]).toMatchObject({
       delta: { mode: "role", previousKeys: expect.any(Set) },
     });
   });

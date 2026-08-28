@@ -6,13 +6,16 @@ import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import JSZip from "jszip";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { loadInstalledPluginIndexInstallRecords } from "../plugins/installed-plugin-index-records.js";
 
 const PACKAGE_NAME = "@openclaw/telemetry-demo";
 const PACKAGE_VERSION = "1.0.0";
 const PLUGIN_ID = "telemetry-demo";
 const ENCODED_PACKAGE_NAME = encodeURIComponent(PACKAGE_NAME);
+const PACKAGE_API_PATH = `/api/v1/packages/${ENCODED_PACKAGE_NAME}`;
+const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 
 async function readRequestBody(req: IncomingMessage): Promise<string> {
   const chunks: Buffer[] = [];
@@ -27,7 +30,7 @@ async function spawnOpenClaw(
   options: { cwd: string; env: NodeJS.ProcessEnv },
 ): Promise<{ status: number | null; stdout: string; stderr: string }> {
   return await new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ["--import", "tsx", "src/entry.ts", ...args], {
+    const child = spawn(process.execPath, ["openclaw.mjs", ...args], {
       cwd: options.cwd,
       env: options.env,
       stdio: ["ignore", "pipe", "pipe"],
@@ -71,6 +74,8 @@ async function buildPluginZip(): Promise<Buffer> {
 
 type TestServerOptions = {
   artifactSha256?: string;
+  artifactCompatibility?: Record<string, string> | null;
+  packageCompatibility?: Record<string, string>;
   telemetryStatus?: number;
 };
 
@@ -84,7 +89,7 @@ async function startClawHubServer(options: TestServerOptions = {}) {
   async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
     requestLog.push(`${req.method ?? "GET"} ${url.pathname}`);
-    const packagePath = `/api/v1/packages/${ENCODED_PACKAGE_NAME}`;
+    const packagePath = PACKAGE_API_PATH;
 
     if (req.method === "GET" && url.pathname === packagePath) {
       res.writeHead(200, { "Content-Type": "application/json" });
@@ -99,7 +104,7 @@ async function startClawHubServer(options: TestServerOptions = {}) {
             isOfficial: false,
             latestVersion: PACKAGE_VERSION,
             tags: { latest: PACKAGE_VERSION },
-            compatibility: {},
+            compatibility: options.packageCompatibility ?? {},
           },
           owner: { handle: "openclaw" },
         }),
@@ -124,7 +129,9 @@ async function startClawHubServer(options: TestServerOptions = {}) {
             createdAt: 1,
             changelog: "Initial release",
             sha256hash: artifactSha256,
-            compatibility: {},
+            ...(options.artifactCompatibility === null
+              ? {}
+              : { compatibility: options.artifactCompatibility ?? {} }),
           },
         }),
       );
@@ -239,7 +246,12 @@ describe("openclaw plugins install ClawHub E2E", () => {
     try {
       const env = buildEnv(stateDir, testServer.registry);
       const first = await spawnOpenClaw(
-        ["plugins", "install", `clawhub:${PACKAGE_NAME}@${PACKAGE_VERSION}`],
+        [
+          "plugins",
+          "install",
+          `clawhub:${PACKAGE_NAME}@${PACKAGE_VERSION}`,
+          "--accept-capabilities",
+        ],
         { cwd: process.cwd(), env },
       );
       expect(first.status, first.stderr || first.stdout).toBe(0);
@@ -257,9 +269,19 @@ describe("openclaw plugins install ClawHub E2E", () => {
           version: PACKAGE_VERSION,
         },
       ]);
+      expect(testServer.requestLog).toContain(
+        `GET ${PACKAGE_API_PATH}/versions/${PACKAGE_VERSION}/security`,
+      );
+      expect(testServer.requestLog).toContain(`GET ${PACKAGE_API_PATH}/download`);
 
       const repeat = await spawnOpenClaw(
-        ["plugins", "install", `clawhub:${PACKAGE_NAME}@${PACKAGE_VERSION}`, "--force"],
+        [
+          "plugins",
+          "install",
+          `clawhub:${PACKAGE_NAME}@${PACKAGE_VERSION}`,
+          "--force",
+          "--accept-capabilities",
+        ],
         { cwd: process.cwd(), env },
       );
       expect(repeat.status, repeat.stderr || repeat.stdout).toBe(0);
@@ -270,6 +292,46 @@ describe("openclaw plugins install ClawHub E2E", () => {
       await fs.rm(stateDir, { recursive: true, force: true });
     }
   }, 60_000);
+
+  it.each([
+    {
+      label: "package plugin API",
+      options: {
+        packageCompatibility: { pluginApiRange: ">=9999.0.0" },
+        artifactCompatibility: null,
+      },
+      error: "requires plugin API >=9999.0.0",
+    },
+    {
+      label: "version gateway",
+      options: { artifactCompatibility: { minGatewayVersion: "9999.0.0" } },
+      error: "requires OpenClaw >=9999.0.0",
+    },
+  ])(
+    "rejects incompatible $label metadata before trust and download",
+    async ({ options, error }) => {
+      const testServer = await startClawHubServer(options);
+      const stateDir = tempDirs.make("openclaw-plugin-compatibility-e2e-");
+      try {
+        const result = await spawnOpenClaw(
+          ["plugins", "install", `clawhub:${PACKAGE_NAME}@${PACKAGE_VERSION}`],
+          { cwd: process.cwd(), env: buildEnv(stateDir, testServer.registry) },
+        );
+
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}\n${result.stderr}`).toContain(error);
+        expect(testServer.requestLog).not.toContain(
+          `GET ${PACKAGE_API_PATH}/versions/${PACKAGE_VERSION}/security`,
+        );
+        expect(testServer.requestLog).not.toContain(`GET ${PACKAGE_API_PATH}/download`);
+        expect(testServer.telemetryBodies).toEqual([]);
+        await expect(readPersistedInstallRecord(stateDir)).resolves.toBeUndefined();
+      } finally {
+        await testServer.close();
+      }
+    },
+    30_000,
+  );
 
   it("does not report success when plugin installation fails", async () => {
     const testServer = await startClawHubServer({ artifactSha256: "0".repeat(64) });
@@ -294,7 +356,12 @@ describe("openclaw plugins install ClawHub E2E", () => {
     const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-plugin-telemetry-down-"));
     try {
       const result = await spawnOpenClaw(
-        ["plugins", "install", `clawhub:${PACKAGE_NAME}@${PACKAGE_VERSION}`],
+        [
+          "plugins",
+          "install",
+          `clawhub:${PACKAGE_NAME}@${PACKAGE_VERSION}`,
+          "--accept-capabilities",
+        ],
         { cwd: process.cwd(), env: buildEnv(stateDir, testServer.registry) },
       );
 

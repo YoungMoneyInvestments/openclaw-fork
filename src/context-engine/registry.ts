@@ -1,8 +1,7 @@
 // Context-engine registry owns engine registration, resolution, compatibility, and quarantine.
 import { sanitizeForLog } from "../../packages/terminal-core/src/ansi.js";
 import type { OpenClawConfig } from "../config/types.js";
-import { createAbortError } from "../infra/abort-signal.js";
-import { getPluginCompatRecord } from "../plugins/compat/registry.js";
+import { createAbortError, isAbortError } from "../infra/abort-signal.js";
 import type {
   ContextEngineFactory,
   ContextEngineFactoryContext,
@@ -42,19 +41,69 @@ type RegisterContextEngineForOwnerOptions = {
 
 type GuardedContextEngineMethodName = Exclude<keyof ContextEngine, "info" | "dispose">;
 const GUARDED_CONTEXT_ENGINE_METHODS = new Set<PropertyKey>(
-  "bootstrap maintain ingest ingestBatch afterTurn assemble compact prepareSubagentSpawn onSubagentEnded".split(
+  "bootstrap maintain ingest ingestBatch afterTurn commitTurn assemble compact prepareSubagentSpawn onSubagentEnded".split(
     " ",
   ),
 );
 export const CONTEXT_ENGINE_HOST_PARAMS = new Set(
-  "sessionKey prompt runtimeSettings sessionTarget runtimeContext".split(" "),
+  "sessionKey prompt runtimeSettings sessionTarget runtimeContext abortSignal".split(" "),
 );
 type ResolvedContextEngineMetadata = {
   owner: string;
   engineId: string;
+  sourceEngine?: ContextEngine;
 };
 
 const resolvedEngineMetadata = new WeakMap<ContextEngine, ResolvedContextEngineMetadata>();
+function projectContextEngineHostParams(
+  engine: ContextEngine,
+  methodName: PropertyKey,
+  params: Record<string, unknown>,
+): Record<string, unknown> {
+  const accepted = engine.info.acceptedHostParams;
+  if (!accepted) {
+    return params;
+  }
+  return Object.fromEntries(
+    Object.entries(params).filter(
+      ([key]) =>
+        accepted.includes(key) ||
+        !CONTEXT_ENGINE_HOST_PARAMS.has(key) ||
+        (methodName === "compact" && key === "abortSignal"),
+    ),
+  );
+}
+
+function wrapContextEngineHostParamProjection(
+  engine: ContextEngine,
+  metadata: ResolvedContextEngineMetadata,
+): ContextEngine {
+  const wrapped = new Proxy(
+    Object.create(engine, { info: { get: () => engine.info } }) as ContextEngine,
+    {
+      get(_target, property) {
+        if (property === "info") {
+          return engine.info;
+        }
+        const method = Reflect.get(engine, property, engine);
+        if (typeof method !== "function") {
+          return method;
+        }
+        if (!GUARDED_CONTEXT_ENGINE_METHODS.has(property)) {
+          return method.bind(engine);
+        }
+        return (params: Record<string, unknown>) =>
+          method.call(engine, projectContextEngineHostParams(engine, property, params));
+      },
+    },
+  );
+  resolvedEngineMetadata.set(wrapped, {
+    ...metadata,
+    sourceEngine: resolvedEngineMetadata.get(engine)?.sourceEngine ?? engine,
+  });
+  return wrapped;
+}
+
 function wrapResolvedContextEngine(
   engine: ContextEngine,
   metadata: ResolvedContextEngineMetadata & {
@@ -62,8 +111,6 @@ function wrapResolvedContextEngine(
     factoryCtx?: ContextEngineFactoryContext;
   },
 ): ContextEngine {
-  const removeAfter = getPluginCompatRecord("context-engine-legacy-host-param-default").removeAfter;
-  const accepted = engine.info.acceptedHostParams;
   const fallback =
     metadata.defaultEngineId &&
     metadata.factoryCtx &&
@@ -82,20 +129,6 @@ function wrapResolvedContextEngine(
           return resolved;
         }))
     : undefined;
-  const projectParams = (params: Record<string, unknown>) => {
-    // Removal(2026-08-12): undeclared engines get full params. Contract: context-engine-legacy-host-param-default.
-    const useLegacyDefault =
-      removeAfter !== undefined && new Date().toISOString().slice(0, 10) <= removeAfter;
-    const currentAccepted = accepted ?? (useLegacyDefault ? [] : undefined);
-    return currentAccepted
-      ? Object.fromEntries(
-          Object.entries(params).filter(
-            ([key]) => currentAccepted.includes(key) || !CONTEXT_ENGINE_HOST_PARAMS.has(key),
-          ),
-        )
-      : params;
-  };
-
   // A fresh target keeps Proxy invariants compatible with frozen engines and private getters.
   const wrapped = new Proxy(
     Object.create(engine, { info: { get: () => engine.info } }) as ContextEngine,
@@ -123,11 +156,12 @@ function wrapResolvedContextEngine(
         if (!GUARDED_CONTEXT_ENGINE_METHODS.has(property)) {
           return method.bind(engine);
         }
+        const methodName = property as GuardedContextEngineMethodName;
         if (!fallback || !getFallbackEngine) {
-          return (params: Record<string, unknown>) => method.call(engine, projectParams(params));
+          return (params: Record<string, unknown>) =>
+            method.call(engine, projectContextEngineHostParams(engine, methodName, params));
         }
 
-        const methodName = property as GuardedContextEngineMethodName;
         return async (methodParams: Record<string, unknown>) => {
           const abortSignal = contextEngineAbortSignal(methodParams);
           if (abortSignal?.aborted) {
@@ -148,7 +182,10 @@ function wrapResolvedContextEngine(
           }
 
           try {
-            return await method.call(engine, projectParams(methodParams));
+            return await method.call(
+              engine,
+              projectContextEngineHostParams(engine, methodName, methodParams),
+            );
           } catch (error) {
             if (isContextEngineAbortRejection(error, abortSignal)) {
               // Abort is caller intent, not engine instability; never quarantine for it.
@@ -172,7 +209,10 @@ function wrapResolvedContextEngine(
       },
     },
   );
-  resolvedEngineMetadata.set(wrapped, metadata);
+  resolvedEngineMetadata.set(wrapped, {
+    ...metadata,
+    sourceEngine: resolvedEngineMetadata.get(engine)?.sourceEngine ?? engine,
+  });
   return wrapped;
 }
 
@@ -325,6 +365,76 @@ export function registerContextEngineInRegistry(
   return { ok: true };
 }
 
+function canAdoptRuntimeContextEngineFromRoot(params: {
+  pluginId: string | undefined;
+  targetRegistry: PluginRegistry;
+  runtimeRegistry: PluginRegistry;
+}): boolean {
+  if (!params.pluginId) {
+    return false;
+  }
+  const targetPlugin = params.targetRegistry.plugins.find(
+    (plugin) => plugin.id === params.pluginId,
+  );
+  const runtimePlugin = params.runtimeRegistry.plugins.find(
+    (plugin) => plugin.id === params.pluginId,
+  );
+  // Same ids can come from workspace shadows. Only carry a factory across registry generations
+  // when both registrations came from the exact same trusted plugin source.
+  return Boolean(
+    targetPlugin &&
+    runtimePlugin &&
+    targetPlugin.status === "loaded" &&
+    runtimePlugin.status === "loaded" &&
+    targetPlugin.source === runtimePlugin.source,
+  );
+}
+
+/**
+ * Scoped production handles stay in discovery mode so full-only plugins cannot
+ * mutate process-global backends. Runtime context engines are adopted from the
+ * composition-root registry instead of re-running `registrationMode: "full"`.
+ */
+export function adoptRuntimeContextEngineRegistrations(
+  targetRegistry: PluginRegistry,
+  runtimeRegistry: PluginRegistry,
+): PluginRegistry {
+  let adopted: Map<string, ContextEngineRegistration> | undefined;
+  const takeAdopted = () => {
+    adopted ??= new Map(targetRegistry.contextEngines);
+    return adopted;
+  };
+
+  for (const [id, runtime] of runtimeRegistry.contextEngines) {
+    if (runtime.lifecycle !== "runtime") {
+      continue;
+    }
+    const target = targetRegistry.contextEngines.get(id);
+    if (target?.lifecycle === "runtime") {
+      continue;
+    }
+    if (target && target.owner !== runtime.owner) {
+      continue;
+    }
+    if (
+      !canAdoptRuntimeContextEngineFromRoot({
+        pluginId: pluginIdFromContextEngineOwner(runtime.owner),
+        targetRegistry,
+        runtimeRegistry,
+      })
+    ) {
+      continue;
+    }
+    takeAdopted().set(id, runtime);
+  }
+
+  if (!adopted) {
+    return targetRegistry;
+  }
+  // Copy-on-write so cached discovery snapshots are not mutated into runtime handles.
+  return { ...targetRegistry, contextEngines: adopted };
+}
+
 /** Clear runtime quarantine only after a complete builder-local registry becomes active. */
 export function activateContextEngineRegistrations(pluginRegistry: PluginRegistry): void {
   for (const [id, registration] of pluginRegistry.contextEngines) {
@@ -346,32 +456,29 @@ function listContextEngineIds(): string[] {
   return [...getContextEngines().keys()].toSorted();
 }
 
-export function clearContextEnginesForOwner(owner: string): void {
-  const normalizedOwner = requireContextEngineOwner(owner);
-  const registry = getContextEngines();
-  for (const [id, entry] of registry.entries()) {
-    if (entry.owner === normalizedOwner) {
-      registry.delete(id);
-      clearContextEngineRuntimeQuarantine(id);
-    }
-  }
-}
-
 /**
  * Return the trusted plugin id that registered a resolved context engine.
+ * Downgraded engines intentionally report no plugin owner.
  */
 export function resolveContextEngineOwnerPluginId(
   engine: ContextEngine | undefined | null,
 ): string | undefined {
   const metadata = engine ? resolvedEngineMetadata.get(engine) : undefined;
-  // Quarantined work belongs to its core-owned fallback, never the disabled plugin.
+  // Downgraded work belongs to its core-owned fallback, never the disabled plugin.
   const owner =
     metadata && !getContextEngineQuarantine(metadata.engineId) ? metadata.owner : undefined;
-  if (!owner?.startsWith("plugin:")) {
+  return owner ? pluginIdFromContextEngineOwner(owner) : undefined;
+}
+
+export const hasSameContextEngineInstance = (left: ContextEngine, right: ContextEngine): boolean =>
+  (resolvedEngineMetadata.get(left)?.sourceEngine ?? left) ===
+  (resolvedEngineMetadata.get(right)?.sourceEngine ?? right);
+
+function pluginIdFromContextEngineOwner(owner: string): string | undefined {
+  if (!owner.startsWith("plugin:")) {
     return undefined;
   }
-  const pluginId = owner.slice("plugin:".length).trim();
-  return pluginId || undefined;
+  return owner.slice("plugin:".length).trim() || undefined;
 }
 
 function describeResolvedContextEngineContractError(
@@ -436,17 +543,28 @@ function contextEngineAbortSignal(methodParams: unknown): AbortSignal | undefine
     : undefined;
 }
 
-function isContextEngineAbortRejection(error: unknown, signal: AbortSignal | undefined): boolean {
+export function isContextEngineAbortRejection(
+  error: unknown,
+  signal: AbortSignal | undefined,
+): boolean {
   if (!signal?.aborted) {
     return false;
   }
-  if (error === signal.reason) {
+  if (error === signal.reason || isAbortError(error)) {
     return true;
   }
-  if (error instanceof Error) {
-    return error.name === "AbortError" || /abort|cancelled|canceled/iu.test(error.message);
+  const seen = new Set<Error>();
+  for (
+    let current = error;
+    current instanceof Error && !seen.has(current);
+    current = current.cause
+  ) {
+    seen.add(current);
+    if (current.cause === signal.reason) {
+      return true;
+    }
   }
-  return typeof error === "string" && /abort|cancelled|canceled/iu.test(error);
+  return false;
 }
 
 async function invokeFallbackContextEngineMethod(params: {
@@ -482,6 +600,117 @@ export type ResolveContextEngineOptions = {
   agentDir?: string;
   workspaceDir?: string;
 };
+
+export type ResolvedContextEngineRef = Readonly<{
+  engine: ContextEngine;
+  registeredId: string;
+  ownerPluginId?: string;
+}>;
+
+export type LogicalTurnContextEngineResolution = {
+  configured: ResolvedContextEngineRef;
+  configuredId: string;
+  configuredFailure?: string;
+  fallback: ResolvedContextEngineRef;
+};
+
+function resolvedContextEngineRef(params: {
+  engine: ContextEngine;
+  registeredId: string;
+  owner: string;
+}): ResolvedContextEngineRef {
+  const pluginId = pluginIdFromContextEngineOwner(params.owner);
+  return Object.freeze({
+    engine: params.engine,
+    registeredId: params.registeredId,
+    ...(pluginId ? { ownerPluginId: pluginId } : {}),
+  });
+}
+
+async function resolveRawContextEngineRef(
+  engineId: string,
+  factoryCtx: ContextEngineFactoryContext,
+): Promise<ResolvedContextEngineRef> {
+  const entry = getContextEngines().get(engineId);
+  if (!entry) {
+    throw new Error(
+      `Context engine "${engineId}" is not registered. ` +
+        `Available engines: ${listContextEngineIds().join(", ") || "(none)"}`,
+    );
+  }
+  const engine = await entry.factory(factoryCtx);
+  const contractError = describeResolvedContextEngineContractError(engineId, engine);
+  if (contractError) {
+    await Promise.resolve((engine as ContextEngine | undefined)?.dispose?.()).catch(
+      () => undefined,
+    );
+    throw new Error(contractError);
+  }
+  const projectedEngine = wrapContextEngineHostParamProjection(engine, {
+    engineId,
+    owner: entry.owner,
+  });
+  return resolvedContextEngineRef({
+    engine: projectedEngine,
+    registeredId: engineId,
+    owner: entry.owner,
+  });
+}
+
+/**
+ * Resolve fresh engines for one logical turn without consulting or mutating
+ * process quarantine. A failed configured engine is retried by the next turn.
+ */
+export async function resolveLogicalTurnContextEngines(
+  config?: OpenClawConfig,
+  options?: ResolveContextEngineOptions,
+): Promise<LogicalTurnContextEngineResolution> {
+  const defaultEngineId = defaultSlotIdForKey("contextEngine");
+  const slotValue = config?.plugins?.slots?.contextEngine;
+  const configuredEngineId =
+    typeof slotValue === "string" && slotValue.trim() ? slotValue.trim() : defaultEngineId;
+  const factoryCtx: ContextEngineFactoryContext = {
+    config,
+    agentDir: options?.agentDir,
+    workspaceDir: options?.workspaceDir,
+  };
+  const fallback = await resolveRawContextEngineRef(defaultEngineId, factoryCtx);
+  if (configuredEngineId === defaultEngineId) {
+    return { configured: fallback, configuredId: configuredEngineId, fallback };
+  }
+  const entry = getContextEngines().get(configuredEngineId);
+  if (!entry) {
+    return {
+      configured: fallback,
+      configuredId: configuredEngineId,
+      configuredFailure: `context engine "${configuredEngineId}" is not registered`,
+      fallback,
+    };
+  }
+  if (entry.lifecycle === "readOnlyDiscovery") {
+    return {
+      configured: fallback,
+      configuredId: configuredEngineId,
+      configuredFailure: `context engine "${configuredEngineId}" is available for discovery only`,
+      fallback,
+    };
+  }
+  try {
+    const configured = await resolveRawContextEngineRef(configuredEngineId, factoryCtx);
+    return {
+      configured,
+      configuredId: configuredEngineId,
+      fallback,
+    };
+  } catch (error) {
+    return {
+      configured: fallback,
+      configuredId: configuredEngineId,
+      configuredFailure: error instanceof Error ? error.message : String(error),
+      fallback,
+    };
+  }
+}
 
 /**
  * Resolve which ContextEngine to use based on plugin slot configuration.

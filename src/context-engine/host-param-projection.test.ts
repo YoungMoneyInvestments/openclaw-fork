@@ -5,6 +5,7 @@ import {
   listContextEngineQuarantines,
   registerContextEngineForOwner,
   resolveContextEngine,
+  resolveLogicalTurnContextEngines,
 } from "./registry.js";
 import {
   captureContextEngineRegistryStateForTests,
@@ -20,6 +21,8 @@ function registerProbeEngine(params: {
   acceptedHostParams?: string[];
   assembleCalls: Array<Record<string, unknown>>;
   compactCalls: Array<Record<string, unknown>>;
+  commitTurnCalls?: Array<Record<string, unknown>>;
+  maintainCalls?: Array<Record<string, unknown>>;
   rejectAssemble?: boolean;
 }): string {
   const engineId = `host-param-probe-${++engineCounter}`;
@@ -46,6 +49,14 @@ function registerProbeEngine(params: {
           params.compactCalls.push({ ...callParams });
           return { ok: true, compacted: false };
         },
+        async maintain(callParams) {
+          params.maintainCalls?.push({ ...callParams });
+          return { changed: false, bytesFreed: 0, rewrittenEntries: 0 };
+        },
+        async commitTurn(callParams) {
+          params.commitTurnCalls?.push({ ...callParams });
+          return { status: "committed" };
+        },
       }) satisfies ContextEngine,
     `test:${engineId}`,
   );
@@ -53,6 +64,7 @@ function registerProbeEngine(params: {
 }
 
 async function invokeHostParamMethods(engine: ContextEngine) {
+  const abortSignal = new AbortController().signal;
   await engine.assemble({
     sessionId: "session-1",
     sessionKey: "agent:main:session-1",
@@ -66,7 +78,17 @@ async function invokeHostParamMethods(engine: ContextEngine) {
     sessionTarget: { agentId: "main", sessionId: "session-1" },
     runtimeSettings,
     runtimeContext: { tokenBudget: 1000 },
+    abortSignal,
   });
+  await engine.maintain?.({
+    sessionId: "session-1",
+    sessionKey: "agent:main:session-1",
+    sessionFile: "/tmp/session-1.jsonl",
+    runtimeSettings,
+    runtimeContext: { tokenBudget: 1000 },
+    abortSignal,
+  });
+  return abortSignal;
 }
 
 describe("context-engine host parameter projection", () => {
@@ -93,6 +115,7 @@ describe("context-engine host parameter projection", () => {
   it("passes declared current host parameters", async () => {
     const assembleCalls: Array<Record<string, unknown>> = [];
     const compactCalls: Array<Record<string, unknown>> = [];
+    const maintainCalls: Array<Record<string, unknown>> = [];
     const engineId = registerProbeEngine({
       acceptedHostParams: [
         "sessionKey",
@@ -100,12 +123,14 @@ describe("context-engine host parameter projection", () => {
         "runtimeSettings",
         "sessionTarget",
         "runtimeContext",
+        "abortSignal",
       ],
       assembleCalls,
       compactCalls,
+      maintainCalls,
     });
 
-    await invokeHostParamMethods(
+    const abortSignal = await invokeHostParamMethods(
       await resolveContextEngine({ plugins: { slots: { contextEngine: engineId } } }),
     );
 
@@ -119,44 +144,175 @@ describe("context-engine host parameter projection", () => {
       sessionTarget: { agentId: "main", sessionId: "session-1" },
       runtimeSettings,
       runtimeContext: { tokenBudget: 1000 },
+      abortSignal,
+    });
+    expect(maintainCalls[0]).toMatchObject({
+      sessionKey: "agent:main:session-1",
+      runtimeSettings,
+      runtimeContext: { tokenBudget: 1000 },
+      abortSignal,
     });
   });
 
-  it("uses the legacy parameter set for undeclared engines during the window", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-07-29T12:00:00Z"));
+  it("projects host parameters on fresh logical-turn engines", async () => {
     const assembleCalls: Array<Record<string, unknown>> = [];
     const compactCalls: Array<Record<string, unknown>> = [];
-    const engineId = registerProbeEngine({ assembleCalls, compactCalls });
+    const maintainCalls: Array<Record<string, unknown>> = [];
+    const engineId = registerProbeEngine({
+      acceptedHostParams: ["runtimeSettings"],
+      assembleCalls,
+      compactCalls,
+      maintainCalls,
+    });
+    const resolution = await resolveLogicalTurnContextEngines({
+      plugins: { slots: { contextEngine: engineId } },
+    });
 
-    await invokeHostParamMethods(
-      await resolveContextEngine({ plugins: { slots: { contextEngine: engineId } } }),
-    );
+    const abortSignal = await invokeHostParamMethods(resolution.configured.engine);
 
-    for (const call of [...assembleCalls, ...compactCalls]) {
-      expect(call).not.toHaveProperty("sessionKey");
-      expect(call).not.toHaveProperty("runtimeSettings");
-    }
+    expect(assembleCalls[0]).toMatchObject({ sessionId: "session-1", runtimeSettings });
+    expect(assembleCalls[0]).not.toHaveProperty("sessionKey");
     expect(assembleCalls[0]).not.toHaveProperty("prompt");
+    expect(compactCalls[0]).toMatchObject({ sessionId: "session-1", runtimeSettings, abortSignal });
     expect(compactCalls[0]).not.toHaveProperty("sessionTarget");
     expect(compactCalls[0]).not.toHaveProperty("runtimeContext");
-    expect(compactCalls[0]).toHaveProperty("sessionId", "session-1");
+    expect(maintainCalls[0]).toMatchObject({ sessionId: "session-1", runtimeSettings });
+    expect(maintainCalls[0]).not.toHaveProperty("sessionKey");
+    expect(maintainCalls[0]).not.toHaveProperty("runtimeContext");
+    expect(maintainCalls[0]).not.toHaveProperty("abortSignal");
+    await Promise.allSettled([
+      resolution.configured.engine.dispose?.(),
+      resolution.fallback.engine.dispose?.(),
+    ]);
   });
 
-  it("passes full host parameters to undeclared engines after the window", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-07-29T12:00:00Z"));
+  it("projects declared host parameters for commitTurn", async () => {
+    const commitTurnCalls: Array<Record<string, unknown>> = [];
+    const engineId = registerProbeEngine({
+      acceptedHostParams: ["runtimeSettings"],
+      assembleCalls: [],
+      compactCalls: [],
+      commitTurnCalls,
+    });
+    const resolution = await resolveLogicalTurnContextEngines({
+      plugins: { slots: { contextEngine: engineId } },
+    });
+    const admission = {
+      agentId: "main",
+      sessionId: "session-1",
+      sessionKey: "agent:main:session-1",
+      storePath: "/tmp/openclaw-agent.sqlite",
+      generation: "generation-1",
+      entryId: "user-1",
+      rawSeq: 1,
+      effectiveParentId: null,
+      activeMessagePosition: 0,
+      logicalTurnId: "turn-1",
+      role: "user" as const,
+    };
+
+    await resolution.configured.engine.commitTurn?.({
+      advancementKey: "turn-1",
+      admission,
+      terminal: {
+        ...admission,
+        entryId: "assistant-1",
+        rawSeq: 2,
+        effectiveParentId: "user-1",
+        activeMessagePosition: 1,
+      },
+      messages: [message],
+      sessionId: "session-1",
+      sessionKey: "agent:main:session-1",
+      sessionTarget: { agentId: "main", sessionId: "session-1" },
+      runtimeSettings,
+      runtimeContext: { tokenBudget: 1000 },
+    });
+
+    expect(commitTurnCalls).toEqual([
+      expect.objectContaining({
+        advancementKey: "turn-1",
+        sessionId: "session-1",
+        runtimeSettings,
+      }),
+    ]);
+    expect(commitTurnCalls[0]).not.toHaveProperty("sessionKey");
+    expect(commitTurnCalls[0]).not.toHaveProperty("sessionTarget");
+    expect(commitTurnCalls[0]).not.toHaveProperty("runtimeContext");
+    await Promise.allSettled([
+      resolution.configured.engine.dispose?.(),
+      resolution.fallback.engine.dispose?.(),
+    ]);
+  });
+
+  it("passes every host parameter to fresh undeclared engines", async () => {
     const assembleCalls: Array<Record<string, unknown>> = [];
     const compactCalls: Array<Record<string, unknown>> = [];
-    const engineId = registerProbeEngine({ assembleCalls, compactCalls });
+    const maintainCalls: Array<Record<string, unknown>> = [];
+    const engineId = registerProbeEngine({ assembleCalls, compactCalls, maintainCalls });
+    const resolution = await resolveLogicalTurnContextEngines({
+      plugins: { slots: { contextEngine: engineId } },
+    });
+
+    const abortSignal = await invokeHostParamMethods(resolution.configured.engine);
+
+    expect(assembleCalls[0]).toMatchObject({
+      sessionId: "session-1",
+      sessionKey: "agent:main:session-1",
+      prompt: "hello",
+      runtimeSettings,
+    });
+    expect(compactCalls[0]).toMatchObject({
+      sessionId: "session-1",
+      sessionKey: "agent:main:session-1",
+      sessionTarget: { agentId: "main", sessionId: "session-1" },
+      runtimeSettings,
+      runtimeContext: { tokenBudget: 1000 },
+      abortSignal,
+    });
+    expect(maintainCalls[0]).toMatchObject({
+      sessionId: "session-1",
+      sessionKey: "agent:main:session-1",
+      runtimeSettings,
+      runtimeContext: { tokenBudget: 1000 },
+      abortSignal,
+    });
+    await Promise.allSettled([
+      resolution.configured.engine.dispose?.(),
+      resolution.fallback.engine.dispose?.(),
+    ]);
+  });
+
+  it("passes every host parameter to resolved undeclared engines", async () => {
+    const assembleCalls: Array<Record<string, unknown>> = [];
+    const compactCalls: Array<Record<string, unknown>> = [];
+    const maintainCalls: Array<Record<string, unknown>> = [];
+    const engineId = registerProbeEngine({ assembleCalls, compactCalls, maintainCalls });
     const engine = await resolveContextEngine({ plugins: { slots: { contextEngine: engineId } } });
 
-    vi.setSystemTime(new Date("2026-08-13T00:00:00Z"));
-    await invokeHostParamMethods(engine);
+    const abortSignal = await invokeHostParamMethods(engine);
 
-    expect(assembleCalls[0]).toHaveProperty("sessionKey", "agent:main:session-1");
-    expect(assembleCalls[0]).toHaveProperty("prompt", "hello");
-    expect(compactCalls[0]).toHaveProperty("runtimeContext", { tokenBudget: 1000 });
+    expect(assembleCalls[0]).toMatchObject({
+      sessionId: "session-1",
+      sessionKey: "agent:main:session-1",
+      prompt: "hello",
+      runtimeSettings,
+    });
+    expect(compactCalls[0]).toMatchObject({
+      sessionId: "session-1",
+      sessionKey: "agent:main:session-1",
+      sessionTarget: { agentId: "main", sessionId: "session-1" },
+      runtimeSettings,
+      runtimeContext: { tokenBudget: 1000 },
+      abortSignal,
+    });
+    expect(maintainCalls[0]).toMatchObject({
+      sessionId: "session-1",
+      sessionKey: "agent:main:session-1",
+      runtimeSettings,
+      runtimeContext: { tokenBudget: 1000 },
+      abortSignal,
+    });
   });
 
   it("does not retry validator-shaped engine failures", async () => {
@@ -185,15 +341,13 @@ describe("context-engine host parameter projection", () => {
   });
 
   it("does not mutate frozen engines reused by a factory", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-07-29T12:00:00Z"));
     const engineId = `host-param-frozen-${++engineCounter}`;
     const assemble = vi.fn<ContextEngine["assemble"]>(async (params) => ({
       messages: params.messages,
       estimatedTokens: 0,
     }));
     class FrozenProbeEngine implements ContextEngine {
-      readonly #info = { id: engineId, name: "Frozen Probe" };
+      readonly #info = { id: engineId, name: "Frozen Probe", acceptedHostParams: [] };
 
       get info() {
         return this.#info;
@@ -214,7 +368,7 @@ describe("context-engine host parameter projection", () => {
 
     const first = await resolveContextEngine({ plugins: { slots: { contextEngine: engineId } } });
     const second = await resolveContextEngine({ plugins: { slots: { contextEngine: engineId } } });
-    expect(first.info).toEqual({ id: engineId, name: "Frozen Probe" });
+    expect(first.info).toEqual({ id: engineId, name: "Frozen Probe", acceptedHostParams: [] });
     await first.assemble({ sessionId: "session-1", sessionKey: "first", messages: [message] });
     await second.assemble({ sessionId: "session-2", sessionKey: "second", messages: [message] });
 

@@ -1,4 +1,5 @@
 // Assertions for update-channel switch E2E scenarios.
+import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { legacyPackageAcceptanceCompat } from "../package-compat.mjs";
@@ -8,7 +9,7 @@ const controlUiHtml = "<!doctype html><title>fixture</title>\n";
 
 function usage() {
   console.error(
-    "usage: assertions.mjs <prepare-git-fixture|write-control-ui|assert-update|assert-config-channel|assert-status-kind> [...]",
+    "usage: assertions.mjs <prepare-git-fixture|write-control-ui|assert-update|assert-dry-run|assert-config-channel|assert-status-kind|assert-installed-version> [...]",
   );
   process.exit(2);
 }
@@ -163,8 +164,8 @@ function assertUpdate(channel) {
   if (channel === "dev" && payload.mode !== "git") {
     throw new Error(`expected dev update mode git, got ${payload.mode}`);
   }
-  if (channel === "stable" && !["npm", "pnpm", "bun"].includes(payload.mode)) {
-    throw new Error(`expected package-manager mode after stable switch, got ${payload.mode}`);
+  if (["stable", "beta"].includes(channel) && !["npm", "pnpm", "bun"].includes(payload.mode)) {
+    throw new Error(`expected package-manager mode after ${channel} switch, got ${payload.mode}`);
   }
   if (payload.postUpdate?.plugins && payload.postUpdate.plugins.status !== "ok") {
     throw new Error(
@@ -189,10 +190,31 @@ function assertConfigChannel(channel) {
   );
 }
 
+function assertDryRun(kind, channel) {
+  const preview = JSON.parse(process.env.UPDATE_JSON ?? "");
+  assert.equal(preview.dryRun, true);
+  assert.equal(preview.installKind, "package");
+  assert.equal(preview.storedChannel, "dev");
+  assert.equal(preview.effectiveChannel, channel);
+  assert.equal(preview.updateInstallKind, kind);
+  assert.equal(preview.mode, kind === "git" ? "git" : "npm");
+  assert.equal(preview.switchToGit, kind === "git");
+  assert.equal(preview.switchToPackage, false);
+}
+
 function assertStatusKind(kind) {
   const payload = JSON.parse(process.env.STATUS_JSON ?? "");
   if (payload.update?.installKind !== kind) {
     throw new Error(`expected ${kind} install after switch, got ${payload.update?.installKind}`);
+  }
+}
+
+function assertInstalledVersion(root, expectedVersion) {
+  const manifest = readJson(path.join(root, "package.json"));
+  if (manifest.version !== expectedVersion) {
+    throw new Error(
+      `expected installed openclaw ${expectedVersion}, got ${String(manifest.version)}`,
+    );
   }
 }
 
@@ -209,8 +231,14 @@ switch (command) {
   case "assert-config-channel":
     assertConfigChannel(args[0]);
     break;
+  case "assert-dry-run":
+    assertDryRun(args[0], args[1]);
+    break;
   case "assert-status-kind":
     assertStatusKind(args[0]);
+    break;
+  case "assert-installed-version":
+    assertInstalledVersion(args[0], args[1]);
     break;
   default:
     usage();

@@ -1,4 +1,7 @@
-import { createAccountListHelpers } from "openclaw/plugin-sdk/account-helpers";
+import {
+  createAccountListHelpers,
+  resolveChannelMediaMaxBytes,
+} from "openclaw/plugin-sdk/account-helpers";
 // Sms plugin module implements accounts behavior.
 import { normalizeOptionalAccountId } from "openclaw/plugin-sdk/account-id";
 import {
@@ -14,6 +17,7 @@ import {
 } from "openclaw/plugin-sdk/secret-input";
 import { normalizeStringEntries } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { normalizeSmsAllowFrom, normalizeSmsPhoneNumber } from "./phone.js";
+import { parseSmsPublicWebhookUrl } from "./public-webhook-url.js";
 import type { ResolvedSmsAccount, SmsChannelConfig } from "./types.js";
 
 const CHANNEL_ID = "sms";
@@ -132,6 +136,11 @@ export function resolveSmsAccount(
     dmPolicy: merged.dmPolicy ?? "pairing",
     allowFrom: parseList(merged.allowFrom ?? envAllowFrom),
     textChunkLimit: parseTextChunkLimit(merged.textChunkLimit ?? envTextChunkLimit),
+    mediaMaxBytes: resolveChannelMediaMaxBytes({
+      cfg,
+      accountId: id,
+      resolveChannelLimitMb: () => merged.mediaMaxMb,
+    }),
   };
 }
 
@@ -143,10 +152,13 @@ export function inspectSmsAccount(cfg: OpenClawConfig, accountId?: string | null
     configured,
     tokenStatus: account.authToken ? "available" : "missing",
     webhookPath: account.webhookPath,
-    signatureValidation:
-      account.dangerouslyDisableSignatureValidation || account.publicWebhookUrl
-        ? "configured"
-        : "missing-public-url",
+    signatureValidation: account.dangerouslyDisableSignatureValidation
+      ? "configured"
+      : !account.publicWebhookUrl
+        ? "missing-public-url"
+        : parseSmsPublicWebhookUrl(account.publicWebhookUrl)
+          ? "configured"
+          : "invalid-public-url",
   };
 }
 

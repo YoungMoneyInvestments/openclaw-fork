@@ -19,8 +19,8 @@ import {
   deriveDefaultBrowserControlPort,
 } from "../config/port-defaults.js";
 import type { SsrFPolicy } from "../infra/net/ssrf.js";
+import { parseBooleanValue } from "../sdk-config.js";
 import { resolveUserPath } from "../utils.js";
-import { parseBooleanValue } from "../utils/boolean.js";
 import { parseBrowserHttpUrl, redactCdpUrl, isLoopbackHost } from "./cdp.helpers.js";
 import {
   DEFAULT_AI_SNAPSHOT_MAX_CHARS,
@@ -36,7 +36,6 @@ import {
   DEFAULT_OPENCLAW_BROWSER_ENABLED,
   DEFAULT_OPENCLAW_BROWSER_PROFILE_NAME,
 } from "./constants.js";
-import { resolveExtensionRelayToken } from "./extension-relay/relay-auth.js";
 import { DEFAULT_UPLOAD_DIR } from "./paths.js";
 
 export {
@@ -91,7 +90,13 @@ export type ResolvedBrowserConfig = {
   extensionRelayDefaultPort: number;
   /** Assigned loopback relay port per extension-driver profile (no explicit cdpPort). */
   extensionRelayPorts: Record<string, number>;
-  /** Derived bearer token for extension relay auth (absent until gateway auth exists). */
+  /** Extension relay authentication compatibility policy. */
+  extensionRelay: {
+    allowLegacyAuth: boolean;
+  };
+  /** Per-profile process-only Basic credentials for internal browser clients. */
+  extensionRelayInternalTokens: Record<string, string>;
+  /** Host-local HMAC key last adopted by the relay lifecycle, not raw config resolution. */
   extensionRelayToken?: string;
 };
 
@@ -138,8 +143,8 @@ const DEFAULT_BROWSER_REMOTE_CDP_HANDSHAKE_TIMEOUT_MS = 3_000;
  * can never hand this port to a managed profile.
  */
 const EXTENSION_RELAY_PORT_OFFSET = 8;
-/** Username half of the relay's Basic credential; the password is the derived token. */
-const EXTENSION_RELAY_CDP_USER = "openclaw";
+/** Username half of the process-only internal relay credential. */
+const EXTENSION_RELAY_CDP_USER = "openclaw-internal";
 /** Environment variable that overrides managed Chrome headless mode. */
 const BROWSER_HEADLESS_ENV_KEY = "OPENCLAW_BROWSER_HEADLESS";
 
@@ -177,7 +182,7 @@ function normalizeExecutablePath(raw: string | undefined): string | undefined {
   if (!/^~(?=$|[\\/])/.test(value)) {
     return value;
   }
-  return path.resolve(value.replace(/^~(?=$|[\\/])/, os.homedir()));
+  return path.resolve(value.replace(/^~(?=$|[\\/])/, () => os.homedir()));
 }
 
 function normalizeExistingSessionCdpUrl(
@@ -411,9 +416,6 @@ export function resolveBrowserConfig(
 
   const headless = cfg?.headless === true;
   const headlessSource = typeof cfg?.headless === "boolean" ? "config" : "default";
-  // Host-local relay secret (created lazily by relay startup / pairing). Null
-  // here just means the extension driver has not been used on this host yet.
-  const extensionRelayToken = resolveExtensionRelayToken() ?? undefined;
   const noSandbox = cfg?.noSandbox === true;
   const attachOnly = cfg?.attachOnly === true;
   const executablePath = normalizeExecutablePath(cfg?.executablePath);
@@ -478,7 +480,10 @@ export function resolveBrowserConfig(
       profiles,
       controlPort + EXTENSION_RELAY_PORT_OFFSET,
     ),
-    ...(extensionRelayToken ? { extensionRelayToken } : {}),
+    extensionRelay: {
+      allowLegacyAuth: cfg?.extensionRelay?.allowLegacyAuth ?? true,
+    },
+    extensionRelayInternalTokens: {},
   };
 }
 
@@ -514,9 +519,9 @@ export function resolveProfile(
       profile.cdpPort ??
       resolved.extensionRelayPorts[profileName] ??
       resolved.extensionRelayDefaultPort;
-    const token = resolved.extensionRelayToken;
-    // Userinfo credentials flow through getHeadersWithAuth into /json/version
-    // and /cdp requests, so the relay is authenticated with zero extra plumbing.
+    const token = resolved.extensionRelayInternalTokens[profileName];
+    // Internal browser clients use a process-only credential. The persistent
+    // relay key is reserved for HMAC proofs and never enters a URL or header.
     const relayCdpUrl = token
       ? `http://${EXTENSION_RELAY_CDP_USER}:${encodeURIComponent(token)}@127.0.0.1:${relayPort}`
       : `http://127.0.0.1:${relayPort}`;

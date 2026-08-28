@@ -3,10 +3,8 @@ import { resolve } from "node:path";
 import type * as Lark from "@larksuiteoapi/node-sdk";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import { normalizeOptionalString, uniqueStrings } from "openclaw/plugin-sdk/string-coerce-runtime";
-import { jsonResult as json } from "openclaw/plugin-sdk/tool-results";
 import { Type } from "typebox";
 import type { OpenClawPluginApi } from "../runtime-api.js";
-import { listEnabledFeishuAccounts } from "./accounts.js";
 import { resolveConfiguredHttpTimeoutMs } from "./client-timeout.js";
 import { FeishuDocSchema, type FeishuDocParams } from "./doc-schema.js";
 import { BATCH_SIZE, insertBlocksInBatches } from "./docx-batch-insert.js";
@@ -33,6 +31,7 @@ import {
   resolveAnyEnabledFeishuToolsConfig,
   resolveFeishuToolAccount,
 } from "./tool-account.js";
+import { feishuExternalToolResult as json } from "./tool-result.js";
 
 function resolveDocToolLocalRoots(ctx: {
   workspaceDir?: string;
@@ -76,28 +75,20 @@ const BLOCK_TYPE_NAMES: Record<number, string> = {
 // Block types that cannot be created via documentBlockChildren.create API
 const UNSUPPORTED_CREATE_TYPES = new Set([31, 32]);
 
-/** Clean blocks for insertion (remove unsupported types and read-only fields) */
+/** Remove block types unsupported by the children insertion API. */
 function cleanBlocksForInsert(blocks: FeishuDocxBlock[]): {
   cleaned: FeishuDocxBlock[];
   skipped: string[];
 } {
   const skipped: string[] = [];
-  const cleaned = blocks
-    .filter((block) => {
-      if (UNSUPPORTED_CREATE_TYPES.has(block.block_type)) {
-        const typeName = BLOCK_TYPE_NAMES[block.block_type] || `type_${block.block_type}`;
-        skipped.push(typeName);
-        return false;
-      }
-      return true;
-    })
-    .map((block) => {
-      if (block.block_type === 31 && block.table?.merge_info) {
-        const { merge_info: _merge_info, ...tableRest } = block.table;
-        return Object.assign({}, block, { table: tableRest });
-      }
-      return block;
-    });
+  const cleaned = blocks.filter((block) => {
+    if (UNSUPPORTED_CREATE_TYPES.has(block.block_type)) {
+      const typeName = BLOCK_TYPE_NAMES[block.block_type] || `type_${block.block_type}`;
+      skipped.push(typeName);
+      return false;
+    }
+    return true;
+  });
   return { cleaned, skipped };
 }
 
@@ -1200,16 +1191,9 @@ export function registerFeishuDocTools(api: OpenClawPluginApi) {
     return;
   }
 
-  // Check if any account is configured
-  const accounts = listEnabledFeishuAccounts(api.config);
-  if (accounts.length === 0) {
-    return;
-  }
-
   // Register if enabled on any account; account routing is resolved per execution.
-  const toolsCfg = resolveAnyEnabledFeishuToolsConfig(accounts);
+  const toolsCfg = resolveAnyEnabledFeishuToolsConfig(api.config);
 
-  const registered: string[] = [];
   type FeishuDocExecuteParams = FeishuDocParams & { accountId?: string };
 
   const getClient = (params: { accountId?: string } | undefined, defaultAccountId?: string) =>
@@ -1258,6 +1242,7 @@ export function registerFeishuDocTools(api: OpenClawPluginApi) {
             : undefined;
         return {
           name: "feishu_doc",
+          resultContentSource: "network",
           label: "Feishu Doc",
           description:
             "Feishu document operations. Actions: read, write, append, insert, create, list_blocks, get_block, update_block, delete_block, create_table, write_table_cells, create_table_with_values, insert_table_row, insert_table_column, delete_table_rows, delete_table_columns, merge_table_cells, upload_image, upload_file, color_text",
@@ -1433,7 +1418,6 @@ export function registerFeishuDocTools(api: OpenClawPluginApi) {
       },
       { name: "feishu_doc" },
     );
-    registered.push("feishu_doc");
   }
 
   // Keep feishu_app_scopes as independent tool
@@ -1441,6 +1425,7 @@ export function registerFeishuDocTools(api: OpenClawPluginApi) {
     api.registerTool(
       (ctx) => ({
         name: "feishu_app_scopes",
+        resultContentSource: "network",
         label: "Feishu App Scopes",
         description:
           "List current app permissions (scopes). Use to debug permission issues or check available capabilities.",
@@ -1462,7 +1447,6 @@ export function registerFeishuDocTools(api: OpenClawPluginApi) {
       }),
       { name: "feishu_app_scopes" },
     );
-    registered.push("feishu_app_scopes");
   }
 }
 /* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

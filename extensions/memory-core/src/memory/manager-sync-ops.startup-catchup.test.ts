@@ -1,4 +1,5 @@
 // Memory Core tests cover manager sync ops.startup catchup plugin behavior.
+import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -11,13 +12,14 @@ import {
 import {
   buildSessionEntry,
   statSessionEntrySync,
-} from "openclaw/plugin-sdk/memory-core-host-engine-qmd";
+} from "openclaw/plugin-sdk/memory-core-host-engine-sessions";
 import {
   MEMORY_CHUNKING_VERSION,
   type MemorySource,
   type MemorySyncParams,
   type MemorySyncProgressUpdate,
 } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
+import { resetPluginStateStoreForTests } from "openclaw/plugin-sdk/plugin-state-test-runtime";
 import {
   clearConfigCache,
   clearRuntimeConfigSnapshot,
@@ -29,6 +31,7 @@ import {
 } from "openclaw/plugin-sdk/session-transcript-runtime";
 import { closeOpenClawAgentDatabasesForTest } from "openclaw/plugin-sdk/sqlite-runtime-testing";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { MemoryIndexDatabase } from "./manager-database-context.js";
 import {
   MEMORY_INDEX_PROVENANCE_VERSION,
   resolveConfiguredScopeHash,
@@ -168,11 +171,10 @@ class SessionStartupCatchupHarness extends MemoryManagerSyncOps {
     pollIntervalMs: 0,
     timeoutMs: 0,
   };
-  protected readonly vector = { enabled: false, available: false };
   protected readonly cache = { enabled: false };
   protected providerUnavailableReason?: string;
   protected providerLifecycle = { mode: "active" as const, providerId: "test" };
-  protected db: DatabaseSync;
+  protected publishedDatabase: MemoryIndexDatabase;
 
   readonly syncCalls: SyncParams[] = [];
   readonly indexedPaths: string[] = [];
@@ -191,7 +193,8 @@ class SessionStartupCatchupHarness extends MemoryManagerSyncOps {
   ) {
     super();
     this.sources.add("sessions");
-    this.db = database ?? createStartupHarnessDatabase(sourceRows);
+    const db = database ?? createStartupHarnessDatabase(sourceRows);
+    this.publishedDatabase = new MemoryIndexDatabase(db);
   }
 
   restartForStartup(): SessionStartupCatchupHarness {
@@ -236,6 +239,11 @@ class SessionStartupCatchupHarness extends MemoryManagerSyncOps {
       needsFullReindex: false,
       deferIndex: this.deferSessionIndex,
     });
+  }
+
+  async getCorpusPathsForTest(): Promise<string[]> {
+    const entries = await this.listSessionCorpusEntries();
+    return entries.map((entry) => this.sessionPathForCorpusEntry(entry));
   }
 
   getDirtyArchiveFiles(): string[] {
@@ -407,6 +415,10 @@ describe("session startup catch-up", () => {
     }
     startupHarnessDatabases.clear();
     closeOpenClawAgentDatabasesForTest();
+    // Closing the agent databases releases their leases through shared state, which
+    // reopens it, so the shared handle has to be released after that and before the
+    // removal or Windows fails the unlink with EBUSY.
+    resetPluginStateStoreForTests();
     await fs.rm(stateDir, { recursive: true, force: true });
   });
 
@@ -513,6 +525,50 @@ describe("session startup catch-up", () => {
     expect(harness.syncCalls).toEqual([{ reason: "session-startup-catchup" }]);
   });
 
+  it("prunes indexed sessions that are absent from the live corpus", async () => {
+    const stalePath = "sessions/main/deleted.jsonl";
+    const harness = new SessionStartupCatchupHarness(
+      [{ path: stalePath, hash: "stale-hash", mtime: 10, size: 20 }],
+      true,
+    );
+
+    await expect(harness.catchUp()).resolves.toEqual([]);
+    await harness.waitForSessionSync();
+
+    expect(harness.syncCalls).toEqual([{ reason: "session-startup-catchup" }]);
+    expect(harness.getIndexedSourceState(stalePath)).toBeUndefined();
+  });
+
+  it("preserves indexed sessions when corpus enumeration fails", async () => {
+    const stalePath = "sessions/main/preserved.jsonl";
+    const harness = new SessionStartupCatchupHarness(
+      [{ path: stalePath, hash: "preserved-hash", mtime: 10, size: 20 }],
+      true,
+    );
+    const scanError = Object.assign(new Error("transient session archive scan failure"), {
+      code: "EIO",
+    });
+    const readdirSpy = vi.spyOn(fsSync, "readdirSync").mockImplementation(() => {
+      throw scanError;
+    });
+
+    try {
+      const catchUp = harness.catchUp();
+      const corpusList = harness.waitForCorpusList();
+      await expect(catchUp).rejects.toBe(scanError);
+      await expect(corpusList).rejects.toBe(scanError);
+      expect(harness.syncCalls).toEqual([]);
+      expect(harness.getIndexedSourceState(stalePath)).toEqual({
+        path: stalePath,
+        hash: "preserved-hash",
+        mtime: 10,
+        size: 20,
+      });
+    } finally {
+      readdirSpy.mockRestore();
+    }
+  });
+
   it("retries transient session transcript reads during session indexing", async () => {
     const session = await writeSessionFile("thread.jsonl.deleted.2026-02-16T22-27-33.000Z");
     const harness = new SessionStartupCatchupHarness([]);
@@ -595,10 +651,15 @@ describe("session startup catch-up", () => {
   });
 
   it("leaves unchanged indexed session files clean", async () => {
-    const session = await writeSessionFile("thread.jsonl");
+    const session = await writeSessionFile("thread.jsonl.deleted.2026-08-09T00-00-00.000Z");
+    const discovery = new SessionStartupCatchupHarness([]);
+    const [corpusPath] = await discovery.getCorpusPathsForTest();
+    if (!corpusPath) {
+      throw new Error("expected session transcript corpus path");
+    }
     const harness = new SessionStartupCatchupHarness([
       {
-        path: "sessions/main/thread.jsonl",
+        path: corpusPath,
         hash: "current-hash",
         mtime: session.mtimeMs,
         size: session.size,
@@ -825,7 +886,8 @@ describe("session startup catch-up", () => {
     await Promise.resolve();
 
     expect(harness.getDirtyArchiveFiles()).toEqual([session.sessionKey]);
-    expect(harness.syncCalls).toEqual([{ reason: "session-delta" }]);
+    expect(harness.syncCalls[0]?.archiveFiles).toEqual([session.sessionKey]);
+    expect(harness.syncCalls[0]?.sessions).toHaveLength(1);
   });
 
   it("keeps targeted indexing on the SQLite store resolved by its corpus snapshot", async () => {
@@ -864,7 +926,7 @@ describe("session startup catch-up", () => {
     expect(harness.indexedContents[0]).not.toContain("replacement store target");
   });
 
-  it("preserves generated-session classification during targeted custom-store indexing", async () => {
+  it("excludes generated cron transcripts from targeted custom-store indexing", async () => {
     const storePath = path.join(stateDir, "custom-sessions", "sessions.json");
     const session = await writeSqliteSession({
       storePath,
@@ -886,8 +948,8 @@ describe("session startup catch-up", () => {
       ],
     });
 
-    expect(harness.indexedPaths).toEqual([session.corpusPath]);
-    expect(harness.indexedContents).toEqual([""]);
+    expect(harness.indexedPaths).toEqual([]);
+    expect(harness.indexedContents).toEqual([]);
   });
 
   it("queues transcript update identity without requiring a session file", async () => {
@@ -1008,7 +1070,7 @@ describe("session startup catch-up", () => {
         await harness.waitForSessionSync();
 
         expect(harness.getDirtyArchiveFiles()).toEqual([session.filePath]);
-        expect(harness.syncCalls).toEqual([{ reason: "session-delta" }]);
+        expect(harness.syncCalls[0]?.archiveFiles).toEqual([session.filePath]);
         expect(harness.indexedPaths).toEqual([
           `sessions/main/thread.jsonl.${reason}.2026-06-23T10-00-00.000Z`,
         ]);
@@ -1022,6 +1084,10 @@ describe("session startup catch-up", () => {
   it.each([
     "thread.jsonl.bak.2026-06-23T10-00-00.000Z",
     "thread.trajectory.jsonl",
+    "thread.trajectory.jsonl.deleted.2026-06-23T10-00-00.000Z",
+    "thread.trajectory.jsonl.reset.2026-06-23T10-00-00.000Z.zst",
+    "thread.checkpoint.11111111-1111-4111-8111-111111111111.jsonl.deleted.2026-06-23T10-00-00.000Z",
+    "thread.checkpoint.11111111-1111-4111-8111-111111111111.jsonl.reset.2026-06-23T10-00-00.000Z.zst",
     "sessions.json",
   ])("ignores non-corpus session artifact updates for %s", async (fileName) => {
     vi.useFakeTimers();
@@ -1035,10 +1101,8 @@ describe("session startup catch-up", () => {
       await vi.advanceTimersByTimeAsync(6000);
       await harness.waitForSessionSync();
 
-      expect(harness.getPendingArchiveFiles()).toEqual([]);
-      expect(harness.getDirtyArchiveFiles()).toEqual([]);
-      expect(harness.syncCalls).toEqual([]);
-      expect(harness.indexedPaths).toEqual([]);
+      expect([harness.getPendingArchiveFiles(), harness.getDirtyArchiveFiles()]).toEqual([[], []]);
+      expect([harness.syncCalls, harness.indexedPaths]).toEqual([[], []]);
     } finally {
       harness.stopTranscriptListener();
     }
@@ -1058,8 +1122,7 @@ describe("session startup catch-up", () => {
       await harness.waitForSessionSync();
 
       expect(harness.getDirtyArchiveFiles()).toEqual([]);
-      expect(harness.syncCalls).toEqual([]);
-      expect(harness.indexedPaths).toEqual([]);
+      expect([harness.syncCalls, harness.indexedPaths]).toEqual([[], []]);
     } finally {
       harness.stopTranscriptListener();
     }

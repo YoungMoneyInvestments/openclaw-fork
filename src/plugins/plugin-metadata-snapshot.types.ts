@@ -1,12 +1,12 @@
 import type { OpenClawConfig } from "../config/types.openclaw.js";
-import type { PluginDiscoveryResult } from "./discovery.js";
+import type { PluginDiscoveryResult } from "./discovery.types.js";
 import type { InstalledPluginIndex } from "./installed-plugin-index-types.js";
-import type { PluginManifestRecord, PluginManifestRegistry } from "./manifest-registry.js";
-import type { PluginDiagnostic } from "./manifest-types.js";
+import type { PluginManifestRecord, PluginManifestRegistry } from "./manifest-registry.types.js";
 import type {
+  PluginDiagnostic,
   PluginManifestProviderEndpoint,
   PluginManifestProviderRequestProvider,
-} from "./manifest.js";
+} from "./manifest-types.js";
 import type { PluginRegistrySnapshotSource } from "./plugin-registry-snapshot.types.js";
 
 export type PluginMetadataSnapshotPluginIdScope = {
@@ -27,7 +27,7 @@ export type PluginMetadataSnapshotOwnerMaps = {
   providerRequests?: ReadonlyMap<string, PluginManifestProviderRequestProvider>;
 };
 
-export type PluginMetadataSnapshotMetrics = {
+type PluginMetadataSnapshotMetrics = {
   registrySnapshotMs: number;
   manifestRegistryMs: number;
   ownerMapsMs: number;
@@ -36,7 +36,7 @@ export type PluginMetadataSnapshotMetrics = {
   manifestPluginCount: number;
 };
 
-export type PluginMetadataSnapshotRegistryDiagnostic = {
+type PluginMetadataSnapshotRegistryDiagnostic = {
   level: "info" | "warn";
   code:
     | "persisted-registry-missing"
@@ -54,6 +54,8 @@ export type PluginMetadataSnapshot = {
   index: InstalledPluginIndex;
   registryDiagnostics: readonly PluginMetadataSnapshotRegistryDiagnostic[];
   manifestRegistry: PluginManifestRegistry;
+  /** Independently validated bundled owners, including packages shadowed by active plugins. */
+  bundledManifestRegistry?: PluginManifestRegistry;
   plugins: readonly PluginManifestRecord[];
   diagnostics: readonly PluginDiagnostic[];
   byPluginId: ReadonlyMap<string, PluginManifestRecord>;
@@ -79,9 +81,9 @@ export type LoadPluginMetadataSnapshotParams = {
   pluginIds?: readonly string[];
   pluginIdScope?: PluginMetadataSnapshotPluginIdScope;
   preferPersisted?: boolean;
+  allowCurrent?: boolean;
 };
 
 export type ResolvePluginMetadataSnapshotParams = LoadPluginMetadataSnapshotParams & {
-  allowCurrent?: boolean;
   allowWorkspaceScopedCurrent?: boolean;
 };

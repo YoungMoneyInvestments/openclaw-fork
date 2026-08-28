@@ -8,12 +8,14 @@ import { testing as cliBackendsTesting } from "../../agents/cli-backends.test-su
 import type { OpenClawConfig } from "../../config/config.js";
 import type { SessionEntry } from "../../config/sessions.js";
 import { loadSessionEntry, replaceSessionEntry } from "../../config/sessions/session-accessor.js";
+import { setActivePluginRegistry } from "../../plugins/runtime.js";
 import {
   MODEL_SELECTION_LOCKED_RESET_MESSAGE,
   ModelSelectionLockedError,
 } from "../../sessions/model-overrides.js";
 import { listSessionStateEventsSince } from "../../sessions/session-state-events.js";
 import { closeOpenClawStateDatabaseForTest } from "../../state/openclaw-state-db.js";
+import { createTestRegistry } from "../../test-utils/channel-plugins.js";
 import { getReplyPayloadMetadata } from "../reply-payload.js";
 import { handleGoalCommand } from "./commands-goal.js";
 import { buildFastReplyCommandContext, initFastReplySessionState } from "./get-reply-fast-path.js";
@@ -26,10 +28,13 @@ import {
   createGetReplyContinueDirectivesResult,
   createGetReplySessionState,
   expectResolvedTelegramTimezone,
+  registerGetReplyBaselineBypass,
   registerGetReplyRuntimeOverrides,
 } from "./get-reply.test-fixtures.js";
 import { loadGetReplyModuleForTest } from "./get-reply.test-loader.js";
 import "./get-reply.test-runtime-mocks.js";
+
+registerGetReplyBaselineBypass();
 
 type LoadModelCatalogFn =
   typeof import("../../agents/prepared-model-catalog.js").loadPreparedModelCatalog;
@@ -65,6 +70,7 @@ vi.mock("./commands-status.js", () => ({
 }));
 
 vi.mock("../../agents/prepared-model-catalog.js", () => ({
+  loadProviderScopedThinkingCatalog: vi.fn(async () => []),
   loadPreparedModelCatalog: mocks.loadModelCatalog,
 }));
 
@@ -206,6 +212,7 @@ describe("getReplyFromConfig fast test bootstrap", () => {
 
   afterEach(() => {
     closeOpenClawStateDatabaseForTest();
+    setActivePluginRegistry(createTestRegistry([]));
     cliBackendsTesting.resetDepsForTest();
     vi.unstubAllEnvs();
   });
@@ -870,21 +877,25 @@ describe("getReplyFromConfig fast test bootstrap", () => {
     const home = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-fast-reset-lineage-"));
     const storePath = path.join(home, "sessions.json");
     const sessionKey = "agent:main:telegram:lineage";
+    const lineage = {
+      spawnedBy: "agent:main:main",
+      parentSessionKey: "agent:main:dashboard:parent",
+      parentSessionId: "parent-session",
+      spawnedWorkspaceDir: "/tmp/workspace",
+      spawnedCwd: "/tmp/repo",
+      forkSource: { sessionKey: "agent:main:main", sessionId: "source-generation" },
+      createdVia: "spawn" as const,
+      createdActor: { type: "agent" as const, id: "agent:main:main" },
+      createdAt: 1_234,
+      spawnDepth: 2,
+      subagentRole: "orchestrator" as const,
+      subagentControlScope: "children" as const,
+    };
     await seedFastPathSessionStore(storePath, {
       [sessionKey]: {
         sessionId: "existing-fast-reset-lineage",
         updatedAt: Date.now(),
-        spawnedBy: "agent:main:main",
-        parentSessionKey: "agent:main:dashboard:parent",
-        spawnedWorkspaceDir: "/tmp/workspace",
-        spawnedCwd: "/tmp/repo",
-        forkSource: { sessionKey: "agent:main:main", sessionId: "source-generation" },
-        createdVia: "spawn",
-        createdActor: { type: "agent", id: "agent:main:main" },
-        createdAt: 1_234,
-        spawnDepth: 2,
-        subagentRole: "orchestrator",
-        subagentControlScope: "children",
+        ...lineage,
       },
     });
 
@@ -903,17 +914,7 @@ describe("getReplyFromConfig fast test bootstrap", () => {
 
     expect(result.sessionEntry).toMatchObject({
       previousSessionId: "existing-fast-reset-lineage",
-      spawnedBy: "agent:main:main",
-      parentSessionKey: "agent:main:dashboard:parent",
-      spawnedWorkspaceDir: "/tmp/workspace",
-      spawnedCwd: "/tmp/repo",
-      forkSource: { sessionKey: "agent:main:main", sessionId: "source-generation" },
-      createdVia: "spawn",
-      createdActor: { type: "agent", id: "agent:main:main" },
-      createdAt: 1_234,
-      spawnDepth: 2,
-      subagentRole: "orchestrator",
-      subagentControlScope: "children",
+      ...lineage,
     });
   });
 

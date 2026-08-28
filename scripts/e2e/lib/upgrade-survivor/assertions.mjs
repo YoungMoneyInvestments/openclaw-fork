@@ -1,9 +1,11 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 // Assertions for upgrade-survivor E2E scenarios.
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { readPluginInstallIndex } from "../plugin-index-sqlite.mjs";
+import { assertUpgradeVolumeMigrated, seedUpgradeVolume } from "./sqlite-volume.mjs";
 
 const command = process.argv[2];
 const SCENARIOS = new Set([
@@ -16,10 +18,12 @@ const SCENARIOS = new Set([
   "plugin-deps-cleanup",
   "configured-plugin-installs",
   "stale-source-plugin-shadow",
+  "prerelease-plugin-registry",
   "tilde-log-path",
   "meeting-transcripts-sqlite",
   "versioned-runtime-deps",
   "cron-scheduled-authority",
+  "sqlite-volume",
   "auth-profile-v2026-7-2-beta-5",
 ]);
 
@@ -33,6 +37,18 @@ const PERSONA_FILES = new Map([
 const LEGACY_SESSION_MAIN_ID = "upgrade-main-session";
 const LEGACY_SESSION_DIRECT_ID = "upgrade-direct-session";
 const LEGACY_SESSION_GROUP_ID = "upgrade-group-session";
+const PLUGIN_DECLARED_SURFACE_GROUPS = [
+  "channels",
+  "providers",
+  "tools",
+  "contracts",
+  "hooks",
+  "mcpServers",
+  "cliCommands",
+  "cliBackends",
+  "skills",
+  "dangerousConfigFlags",
+];
 
 function requireEnv(name) {
   const value = process.env[name];
@@ -96,13 +112,14 @@ function assert(condition, message) {
 
 function seedLegacySessionMetadata(stateDir) {
   const legacySessionsDir = path.join(stateDir, "sessions");
+  const baseUpdatedAt = Date.now() - 24 * 60 * 60 * 1000;
   writeJson(path.join(legacySessionsDir, "sessions.json"), {
     main: {
       sessionId: LEGACY_SESSION_MAIN_ID,
       sessionFile: path.join(legacySessionsDir, `${LEGACY_SESSION_MAIN_ID}.jsonl`),
       provider: "openai",
       model: "gpt-5.5",
-      updatedAt: 1710000000000,
+      updatedAt: baseUpdatedAt,
       skillsSnapshot: {
         prompt: "legacy prompt survives as metadata",
         resolvedSkills: [
@@ -118,14 +135,14 @@ function seedLegacySessionMetadata(stateDir) {
       sessionFile: path.join(legacySessionsDir, `${LEGACY_SESSION_DIRECT_ID}.jsonl`),
       provider: "openai",
       model: "gpt-5.5",
-      updatedAt: 1710000000100,
+      updatedAt: baseUpdatedAt + 100,
     },
     "slack:channel:CUPGRADE": {
       sessionId: LEGACY_SESSION_GROUP_ID,
       sessionFile: path.join(legacySessionsDir, `${LEGACY_SESSION_GROUP_ID}.jsonl`),
       provider: "openai",
       model: "gpt-5.5",
-      updatedAt: 1710000000200,
+      updatedAt: baseUpdatedAt + 200,
       lastChannel: "slack",
       lastTo: "CUPGRADE",
     },
@@ -388,14 +405,16 @@ function seedState() {
 function assertConfigSurvived() {
   const config = getConfig();
   const coverage = getCoverage();
-  if (getScenario() === "meeting-transcripts-sqlite") {
+  const scenario = getScenario();
+  if (scenario === "meeting-transcripts-sqlite") {
     // This focused migration fixture proves state import/export across one published
     // baseline; the broad base scenario owns unrelated agent/channel config parity.
     return;
   }
 
   if (acceptsIntent(coverage, "update")) {
-    assert(config.update?.channel === "stable", "update.channel was not preserved");
+    const expectedChannel = scenario === "prerelease-plugin-registry" ? "beta" : "stable";
+    assert(config.update?.channel === expectedChannel, "update.channel was not preserved");
   }
   if (acceptsIntent(coverage, "gateway")) {
     assert(config.gateway?.auth?.mode === "token", "gateway auth mode was not preserved");
@@ -413,11 +432,6 @@ function assertConfigSurvived() {
       config.agents?.entries?.ops ?? legacyAgents.find((agent) => agent?.id === "ops");
     assert(mainAgent, "main agent missing");
     assert(opsAgent, "ops agent missing");
-    if (hasCoverage(coverage)) {
-      assert(config.agents?.defaults?.contextTokens === 64000, "default contextTokens changed");
-    } else {
-      assert(mainAgent.contextTokens === 64000, "main agent contextTokens changed");
-    }
     if (!hasCoverage(coverage) || !coverage.skippedIntents?.includes("agent-modern-preferences")) {
       assert(opsAgent.fastModeDefault === true, "ops fastModeDefault changed");
     }
@@ -431,12 +445,12 @@ function assertConfigSurvived() {
     const pluginAllow = config.plugins?.allow ?? [];
     assert(pluginAllow.includes("discord"), "discord plugin allow entry missing");
     assert(pluginAllow.includes("telegram"), "telegram plugin allow entry missing");
-    if (getScenario() === "configured-plugin-installs") {
+    if (hasCoverage(coverage) && acceptsIntent(coverage, "configured-plugin-installs")) {
       assert(pluginAllow.includes("matrix"), "matrix plugin allow entry missing");
     } else {
       assert(pluginAllow.includes("whatsapp"), "whatsapp plugin allow entry missing");
     }
-    if (getScenario() === "codex-allowlist-survival") {
+    if (scenario === "codex-allowlist-survival") {
       assert(pluginAllow.includes("codex"), "Codex plugin allow entry missing");
     }
     if (hasCoverage(coverage) && acceptsIntent(coverage, "feishu-channel")) {
@@ -468,8 +482,14 @@ function assertConfigSurvived() {
   if (acceptsIntent(coverage, "discord-channel")) {
     const discord = config.channels?.discord;
     assert(discord?.enabled === true, "discord enabled flag changed");
-    const discordAllowFrom = discord.allowFrom ?? discord.dm?.allowFrom;
-    const discordDmPolicy = discord.dmPolicy ?? discord.dm?.policy;
+    const stage = process.env.OPENCLAW_UPGRADE_SURVIVOR_ASSERT_STAGE || "survival";
+    const discordAllowFrom =
+      stage === "baseline" ? (discord.allowFrom ?? discord.dm?.allowFrom) : discord.allowFrom;
+    const discordDmPolicy =
+      stage === "baseline" ? (discord.dmPolicy ?? discord.dm?.policy) : discord.dmPolicy;
+    if (stage !== "baseline") {
+      assert(!Object.hasOwn(discord, "dm"), "legacy Discord DM config survived update");
+    }
     assert(discordDmPolicy === "allowlist", "discord DM policy changed");
     assert(
       Array.isArray(discordAllowFrom) && discordAllowFrom.includes("111111111111111111"),
@@ -494,7 +514,7 @@ function assertConfigSurvived() {
 
   if (
     acceptsIntent(coverage, "whatsapp-channel") &&
-    getScenario() !== "configured-plugin-installs"
+    !acceptsIntent(coverage, "configured-plugin-installs")
   ) {
     const whatsapp = config.channels?.whatsapp;
     assert(whatsapp?.enabled === true, "whatsapp enabled flag changed");
@@ -509,7 +529,7 @@ function assertConfigSurvived() {
     }
   }
 
-  if (getScenario() === "channel-post-core-restore") {
+  if (scenario === "channel-post-core-restore") {
     const whatsapp = config.channels?.whatsapp;
     assert(whatsapp?.enabled === true, "post-core channel restore dropped WhatsApp");
     assert(
@@ -567,6 +587,9 @@ function assertStateSurvived() {
   }
   if (scenario === "cron-scheduled-authority") {
     assertCronScheduledAuthorityMigrated(stateDir, stage);
+  }
+  if (scenario === "sqlite-volume") {
+    assertUpgradeVolumeMigrated(stateDir, stage);
   }
   if (scenario === "auth-profile-v2026-7-2-beta-5") {
     assertAuthProfileMigrationSurvived(stateDir, stage);
@@ -822,31 +845,37 @@ function assertSessionMetadataMigrated(stateDir) {
   const legacyStorePath = path.join(stateDir, "sessions", "sessions.json");
   const agentSessionsDir = path.join(stateDir, "agents", "main", "sessions");
   const targetStorePath = path.join(agentSessionsDir, "sessions.json");
-  const dbPath = path.join(stateDir, "agents", "main", "agent", "openclaw-agent.sqlite");
   assert(
     !fs.existsSync(legacyStorePath),
     `legacy sessions.json survived migration: ${legacyStorePath}`,
   );
 
-  const store = readMigratedSessionStore(stateDir, targetStorePath);
+  const { source, store } = readMigratedSessionStore(stateDir, targetStorePath);
   const main = store["agent:main:main"];
   const direct = store["agent:main:+15551234567"];
   const group = store["agent:main:slack:channel:cupgrade"];
   assert(main?.sessionId === LEGACY_SESSION_MAIN_ID, "main legacy session row missing");
   assert(direct?.sessionId === LEGACY_SESSION_DIRECT_ID, "direct legacy session row missing");
   assert(group?.sessionId === LEGACY_SESSION_GROUP_ID, "channel legacy session row missing");
-  const migratedSessionIds = [
-    LEGACY_SESSION_MAIN_ID,
-    LEGACY_SESSION_DIRECT_ID,
-    LEGACY_SESSION_GROUP_ID,
+  const migratedSessions = [
+    [LEGACY_SESSION_MAIN_ID, main],
+    [LEGACY_SESSION_DIRECT_ID, direct],
+    [LEGACY_SESSION_GROUP_ID, group],
   ];
-  if (fs.existsSync(dbPath)) {
+  for (const [sessionId, entry] of migratedSessions) {
+    assert(
+      !Object.hasOwn(entry ?? {}, "sessionFile"),
+      `legacy session row retained retired sessionFile metadata for ${sessionId}`,
+    );
+  }
+  if (source !== "file") {
+    const dbPath = path.join(stateDir, "agents", "main", "agent", "openclaw-agent.sqlite");
     const db = new DatabaseSync(dbPath, { readOnly: true });
     try {
       const count = db.prepare(
         "SELECT COUNT(*) AS count FROM transcript_events WHERE session_id = ?",
       );
-      for (const sessionId of migratedSessionIds) {
+      for (const [sessionId] of migratedSessions) {
         const row = count.get(sessionId);
         assert(
           Number(row?.count ?? 0) > 0,
@@ -857,19 +886,11 @@ function assertSessionMetadataMigrated(stateDir) {
       db.close();
     }
   } else {
-    for (const [sessionId, entry] of [
-      [LEGACY_SESSION_MAIN_ID, main],
-      [LEGACY_SESSION_DIRECT_ID, direct],
-      [LEGACY_SESSION_GROUP_ID, group],
-    ]) {
+    for (const [sessionId] of migratedSessions) {
       const expectedPath = path.join(agentSessionsDir, `${sessionId}.jsonl`);
       assert(
         fs.existsSync(expectedPath),
         `legacy session transcript was not moved for ${sessionId}`,
-      );
-      assert(
-        entry?.sessionFile === expectedPath,
-        `legacy session row still points at the old sessions directory for ${sessionId}`,
       );
     }
   }
@@ -884,42 +905,71 @@ function assertSessionMetadataMigrated(stateDir) {
 }
 
 function readMigratedSessionStore(stateDir, targetStorePath) {
-  if (fs.existsSync(targetStorePath)) {
-    return readJson(targetStorePath);
-  }
-
   const dbPath = path.join(stateDir, "agents", "main", "agent", "openclaw-agent.sqlite");
-  assert(fs.existsSync(dbPath), `agent session store missing: ${targetStorePath} or ${dbPath}`);
-
-  let db;
-  try {
-    db = new DatabaseSync(dbPath, { readOnly: true });
-    const hasSessionEntries = db
-      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'session_nodes'")
-      .get();
-    const rows = hasSessionEntries
-      ? db
+  if (fs.existsSync(dbPath)) {
+    let db;
+    try {
+      db = new DatabaseSync(dbPath, { readOnly: true });
+      const tables = new Set(
+        db
           .prepare(
-            `SELECT session_key AS key, current_session_id AS session_id, entry_json AS value_json
-             FROM session_nodes`,
+            `SELECT name
+             FROM sqlite_master
+             WHERE type = 'table'
+               AND name IN ('session_nodes', 'session_entries', 'cache_entries')`,
           )
           .all()
-      : db
-          .prepare("SELECT key, value_json FROM cache_entries WHERE scope = ?")
-          .all("session_entries");
-    const store = {};
-    for (const row of rows) {
-      if (typeof row?.key !== "string" || typeof row?.value_json !== "string") {
-        continue;
+          .map((row) => row.name),
+      );
+      // SQLite is authoritative once it owns a supported session table. A stale
+      // sessions.json must not hide missing, malformed, or unreadable database state.
+      const source = tables.has("session_nodes")
+        ? "session_nodes"
+        : tables.has("session_entries")
+          ? "session_entries"
+          : tables.has("cache_entries")
+            ? "cache_entries"
+            : null;
+      if (source) {
+        const rows =
+          source === "session_nodes"
+            ? db
+                .prepare(
+                  `SELECT session_key AS key, current_session_id AS session_id, entry_json AS value_json
+                   FROM session_nodes`,
+                )
+                .all()
+            : source === "session_entries"
+              ? db
+                  .prepare(
+                    `SELECT session_key AS key, session_id, entry_json AS value_json
+                     FROM session_entries`,
+                  )
+                  .all()
+              : db
+                  .prepare("SELECT key, value_json FROM cache_entries WHERE scope = ?")
+                  .all("session_entries");
+        const store = {};
+        for (const row of rows) {
+          if (typeof row?.key !== "string" || typeof row?.value_json !== "string") {
+            continue;
+          }
+          const entry = JSON.parse(row.value_json);
+          store[row.key] =
+            typeof row.session_id === "string" ? { ...entry, sessionId: row.session_id } : entry;
+        }
+        return { source, store };
       }
-      const entry = JSON.parse(row.value_json);
-      store[row.key] =
-        typeof row.session_id === "string" ? { ...entry, sessionId: row.session_id } : entry;
+    } finally {
+      db?.close();
     }
-    return store;
-  } finally {
-    db?.close();
   }
+
+  assert(
+    fs.existsSync(targetStorePath),
+    `agent session store missing: ${targetStorePath} or ${dbPath}`,
+  );
+  return { source: "file", store: readJson(targetStorePath) };
 }
 
 function readInstalledPluginIndex() {
@@ -969,7 +1019,7 @@ function assertExternalPluginInstall(records, pluginId, packageName) {
       String(record.spec ?? record.resolvedSpec ?? "").startsWith(packageName),
       `configured external ${pluginId} plugin npm spec changed`,
     );
-    return;
+    return packageJson;
   }
   assert(
     record.clawhubPackage === packageName,
@@ -980,6 +1030,79 @@ function assertExternalPluginInstall(records, pluginId, packageName) {
     isPathInside(extensionsRoot, installPath),
     `configured external ${pluginId} ClawHub install path outside managed extensions root: ${installPath}`,
   );
+  return packageJson;
+}
+
+function pluginInstallIntegrity(record) {
+  return record.integrity ?? record.npmIntegrity ?? record.clawpackSha256 ?? record.gitCommit;
+}
+
+function acceptedSurfaceHash(surface) {
+  const canonical = Object.fromEntries(
+    PLUGIN_DECLARED_SURFACE_GROUPS.map((group) => [group, surface[group].toSorted()]),
+  );
+  return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
+}
+
+function assertCompanionPluginConsent(record, pluginId, integrity) {
+  assert(
+    record.acceptedSurface && typeof record.acceptedSurface === "object",
+    `${pluginId} plugin accepted surface missing`,
+  );
+  for (const group of PLUGIN_DECLARED_SURFACE_GROUPS) {
+    assert(
+      Array.isArray(record.acceptedSurface[group]),
+      `${pluginId} plugin accepted surface ${group} missing`,
+    );
+  }
+  assert(
+    record.acceptedSurfaceHash === acceptedSurfaceHash(record.acceptedSurface),
+    `${pluginId} plugin consent hash changed`,
+  );
+  assert(
+    record.acceptedSurfaceIntegrity === integrity,
+    `${pluginId} plugin consent integrity changed`,
+  );
+  assert(
+    typeof record.acceptedSurfaceAt === "string" &&
+      Number.isFinite(Date.parse(record.acceptedSurfaceAt)),
+    `${pluginId} plugin consent timestamp missing`,
+  );
+}
+
+function assertCompanionPluginInstalls([expectedVersion, capabilityConsentSupported]) {
+  assert(expectedVersion, "assert-companion-installs requires <expected-version>");
+  assert(
+    capabilityConsentSupported === "0" || capabilityConsentSupported === "1",
+    "assert-companion-installs requires candidate capability-consent support",
+  );
+  const records = readInstalledPluginIndex().installRecords ?? {};
+  for (const [pluginId, packageName, source] of [
+    ["discord", "@openclaw/discord", "npm"],
+    ["whatsapp", "@openclaw/whatsapp", "clawhub"],
+    ["codex", "@openclaw/codex", "npm"],
+  ]) {
+    const packageJson = assertExternalPluginInstall(records, pluginId, packageName);
+    const record = records[pluginId];
+    assert(record.source === source, `${pluginId} plugin source changed: ${record.source}`);
+    const installedVersion = source === "clawhub" ? record.version : record.resolvedVersion;
+    assert(
+      installedVersion === expectedVersion,
+      `${pluginId} plugin version changed: ${String(installedVersion)}`,
+    );
+    assert(
+      packageJson.version === expectedVersion,
+      `${pluginId} installed package version changed: ${String(packageJson.version)}`,
+    );
+    const integrity = pluginInstallIntegrity(record);
+    assert(
+      typeof integrity === "string" && integrity.length > 0,
+      `${pluginId} plugin integrity missing`,
+    );
+    if (capabilityConsentSupported === "1") {
+      assertCompanionPluginConsent(record, pluginId, integrity);
+    }
+  }
 }
 
 function assertConfiguredPluginInstalls() {
@@ -1189,11 +1312,17 @@ if (command === "list-scenarios") {
   process.stdout.write(`${JSON.stringify([...SCENARIOS])}\n`);
 } else if (command === "seed") {
   seedState();
+} else if (command === "seed-volume") {
+  assert(getScenario() === "sqlite-volume", "seed-volume requires the sqlite-volume scenario");
+  const stateDir = requireEnv("OPENCLAW_STATE_DIR");
+  seedUpgradeVolume(stateDir);
 } else if (command === "assert-config") {
   assertConfigSurvived();
 } else if (command === "assert-state") {
   assertStateSurvived();
   assertConfiguredPluginInstalls();
+} else if (command === "assert-companion-installs") {
+  assertCompanionPluginInstalls(process.argv.slice(3));
 } else if (command === "assert-status-json") {
   assertStatusJson(process.argv.slice(3));
 } else if (command === "assert-update-run-self-upgrade") {

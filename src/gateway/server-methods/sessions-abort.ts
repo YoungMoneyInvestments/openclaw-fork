@@ -8,8 +8,10 @@ import {
   errorShape,
   validateSessionsAbortParams,
 } from "../../../packages/gateway-protocol/src/index.js";
-import { resolveDefaultAgentId } from "../../agents/agent-scope.js";
-import { abortEmbeddedAgentRun } from "../../agents/embedded-agent-runner/runs.js";
+import {
+  abortEmbeddedAgentRun,
+  resolveActiveEmbeddedRunOwnerByRunId,
+} from "../../agents/embedded-agent-runner/runs.js";
 import { clearSessionQueues } from "../../auto-reply/reply/queue/cleanup.js";
 import {
   isConfiguredSessionStoreAgentId,
@@ -17,8 +19,13 @@ import {
 } from "../../config/sessions.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { normalizeAgentId, parseAgentSessionKey } from "../../routing/session-key.js";
+import { setGatewayDedupeEntry } from "../agent-turn/agent-job.js";
+import { resolveChatRunOwnerAgentId } from "../chat-run-owner.js";
 import { resolveSessionKeyForRun } from "../server-session-key.js";
-import { resolveRequestedSessionAgentId as resolveRequestedGlobalAgentId } from "../session-create-service.js";
+import {
+  resolveRequestedSessionAgentId as resolveRequestedGlobalAgentId,
+  tryResolveSessionCompatibilityOwnerAgentId,
+} from "../session-request-agent.js";
 import {
   resolveSessionStoreAgentId,
   resolveSessionStoreKey,
@@ -28,7 +35,6 @@ import {
 import { loadSessionEntry } from "../session-utils.js";
 import { asWorkerInferenceControl } from "../worker-environments/inference-control.js";
 import { resolveWorkerSessionTarget } from "../worker-environments/session-target.js";
-import { setGatewayDedupeEntry } from "./agent-job.js";
 import { handleChatAbortRequestWithLifecycle } from "./chat-abort-handler.js";
 import { emitSessionsChanged } from "./session-change-event.js";
 import { requireSessionKey } from "./sessions-shared.js";
@@ -41,6 +47,8 @@ export function resolveAbortSessionKey(params: {
   canonicalKey: string;
   activeRunSessionKey?: string;
   aliasKeys?: string[];
+  agentId?: string;
+  defaultAgentId?: string;
 }): string {
   if (params.activeRunSessionKey) {
     return params.activeRunSessionKey;
@@ -52,7 +60,14 @@ export function resolveAbortSessionKey(params: {
     }
     for (const candidate of candidates) {
       if (active.sessionKey === candidate) {
-        return candidate;
+        const owner = resolveChatRunOwnerAgentId({
+          agentId: active.agentId,
+          sessionKey: active.sessionKey,
+          defaultAgentId: params.defaultAgentId,
+        });
+        if (!params.agentId || owner === normalizeAgentId(params.agentId)) {
+          return candidate;
+        }
       }
     }
   }
@@ -70,8 +85,7 @@ function resolveSessionKeyAgentId(
   if (!parseAgentSessionKey(key) && key.toLowerCase().startsWith("agent:")) {
     return undefined;
   }
-  const canonicalKey = resolveSessionStoreKey({ cfg, sessionKey: key });
-  return resolveSessionStoreAgentId(cfg, canonicalKey);
+  return parseAgentSessionKey(key)?.agentId ?? tryResolveSessionCompatibilityOwnerAgentId(cfg, key);
 }
 
 function sessionKeyBelongsToAgent(
@@ -79,12 +93,7 @@ function sessionKeyBelongsToAgent(
   agentId: string,
   cfg: OpenClawConfig,
 ): boolean {
-  const key = normalizeOptionalString(sessionKey);
-  if (cfg.session?.scope === "global" && key?.toLowerCase() === "global") {
-    return true;
-  }
-  const sessionAgentId = resolveSessionKeyAgentId(sessionKey, cfg);
-  return Boolean(sessionAgentId && sessionAgentId === normalizeAgentId(agentId));
+  return resolveSessionKeyAgentId(sessionKey, cfg) === normalizeAgentId(agentId);
 }
 
 function resolveScopedAbortKey(params: {
@@ -135,6 +144,10 @@ export const sessionAbortHandlers: GatewayRequestHandlers = {
     const workerRunTarget = workerRunSessionId
       ? resolveWorkerSessionTarget(cfg, workerRunSessionId)
       : undefined;
+    const embeddedRun = requestedRunId
+      ? resolveActiveEmbeddedRunOwnerByRunId(requestedRunId)
+      : undefined;
+    const embeddedRunSessionKey = embeddedRun?.sessionKey;
     const scopedRequestedKey = resolveScopedAbortKey({
       cfg,
       key: requestedKey,
@@ -154,14 +167,24 @@ export const sessionAbortHandlers: GatewayRequestHandlers = {
     const activeRun = requestedRunId ? context.chatAbortControllers.get(requestedRunId) : undefined;
     const activeRunSessionKey = activeRun?.sessionKey;
     const activeRunAgentId = normalizeOptionalString(activeRun?.agentId);
-    const inferredRunAgentId =
+    let inferredRunAgentId =
       requestedParamAgentId ??
-      (requestedRunId && scopedRequestedKey?.toLowerCase() === "global"
-        ? activeRunAgentId
-        : undefined) ??
+      activeRunAgentId ??
       requestedKeyAgentId ??
       workerRunTarget?.agentId ??
-      (requestedRunId && !activeRunSessionKey ? resolveDefaultAgentId(cfg) : undefined);
+      resolveSessionKeyAgentId(activeRunSessionKey, cfg) ??
+      resolveSessionKeyAgentId(embeddedRunSessionKey, cfg);
+    if (requestedRunId && !inferredRunAgentId) {
+      const runOwner = resolveRequestedGlobalAgentId(
+        cfg,
+        scopedRequestedKey ?? activeRunSessionKey ?? workerRunTarget?.sessionKey ?? "main",
+      );
+      if (!runOwner.ok) {
+        respond(false, undefined, runOwner.error);
+        return;
+      }
+      inferredRunAgentId = runOwner.agentId;
+    }
     const requestedRunAgentId = requestedRunId
       ? inferredRunAgentId
         ? normalizeAgentId(inferredRunAgentId)
@@ -178,11 +201,13 @@ export const sessionAbortHandlers: GatewayRequestHandlers = {
       scopedRequestedKey ??
       scopedActiveRunSessionKey ??
       (requestedRunId
-        ? resolveSessionKeyForRun(requestedRunId, {
-            agentId: requestedRunAgentId ?? resolveDefaultAgentId(cfg),
-          })
+        ? resolveSessionKeyForRun(
+            requestedRunId,
+            requestedRunAgentId ? { agentId: requestedRunAgentId } : undefined,
+          )
         : undefined) ??
-      workerRunTarget?.sessionKey;
+      workerRunTarget?.sessionKey ??
+      embeddedRunSessionKey;
     if (!keyCandidate && requestedRunId) {
       respond(true, { ok: true, abortedRunId: null, status: "no-active-run" });
       return;
@@ -208,10 +233,25 @@ export const sessionAbortHandlers: GatewayRequestHandlers = {
     const existingTargets = configuredTarget
       ? []
       : resolveExistingAgentSessionStoreTargetsSync(cfg, targetAgentId);
+    const stableTargetOwner = tryResolveSessionCompatibilityOwnerAgentId(cfg, key);
     const hasExactActiveRun = requestedRunId
-      ? scopedActiveRunSessionKey === key
+      ? (scopedActiveRunSessionKey === key &&
+          resolveChatRunOwnerAgentId({
+            agentId: activeRunAgentId,
+            sessionKey: activeRunSessionKey,
+            defaultAgentId: stableTargetOwner,
+          }) === normalizeAgentId(targetAgentId)) ||
+        (embeddedRun !== undefined &&
+          resolveSessionKeyAgentId(embeddedRunSessionKey, cfg) === normalizeAgentId(targetAgentId))
       : [...context.chatAbortControllers.values()].some(
-          (entry) => entry.controlUiVisible !== false && entry.sessionKey === key,
+          (entry) =>
+            entry.controlUiVisible !== false &&
+            entry.sessionKey === key &&
+            resolveChatRunOwnerAgentId({
+              agentId: entry.agentId,
+              sessionKey: entry.sessionKey,
+              defaultAgentId: stableTargetOwner,
+            }) === normalizeAgentId(targetAgentId),
         );
     if (!configuredTarget && existingTargets.length === 0 && !hasExactActiveRun) {
       respond(
@@ -235,6 +275,21 @@ export const sessionAbortHandlers: GatewayRequestHandlers = {
         ...(requestedGlobalAgentId ? { storeAgentId: requestedGlobalAgentId } : {}),
       });
     const sessionEntry = loadedSession?.entry;
+    const embeddedRunMatchesSession = Boolean(
+      embeddedRun &&
+      resolveSessionKeyAgentId(embeddedRun.sessionKey, cfg) === normalizeAgentId(targetAgentId) &&
+      (embeddedRun.sessionKey === key ||
+        embeddedRun.sessionKey === canonicalKey ||
+        sessionEntry?.sessionId === embeddedRun.sessionId),
+    );
+    if (embeddedRun && !embeddedRunMatchesSession) {
+      respond(
+        false,
+        undefined,
+        errorShape(ErrorCodes.INVALID_REQUEST, "runId does not match session"),
+      );
+      return;
+    }
     const requestedKeyAliases =
       requestedKey &&
       requestedKey !== key &&
@@ -247,11 +302,28 @@ export const sessionAbortHandlers: GatewayRequestHandlers = {
       canonicalKey,
       activeRunSessionKey: scopedActiveRunSessionKey,
       aliasKeys: requestedKeyAliases,
+      agentId: requestedGlobalAgentId,
+      defaultAgentId: stableTargetOwner,
     });
     const abortSessionKey =
       canonicalKey === "global" && requestedGlobalAgentId ? "global" : resolvedAbortSessionKey;
-    const abortAgentId =
-      abortSessionKey === "global" ? (requestedGlobalAgentId ?? activeRunAgentId) : undefined;
+    const abortAgentId = requestedGlobalAgentId ?? activeRunAgentId;
+    if (embeddedRun) {
+      const aborted = embeddedRun.abort();
+      respond(true, {
+        ok: true,
+        abortedRunId: aborted ? embeddedRun.runId : null,
+        status: aborted ? "aborted" : "no-active-run",
+      });
+      if (aborted) {
+        emitSessionsChanged(context, {
+          sessionKey: canonicalKey,
+          ...(abortAgentId ? { agentId: abortAgentId } : {}),
+          reason: "abort",
+        });
+      }
+      return;
+    }
     // Capture run kinds before the abort because abortChatRunById deletes entries
     // from chatAbortControllers synchronously. We use this snapshot to choose the
     // correct dedupe namespace: agent-kind runs use "agent:" (their runId equals
@@ -349,7 +421,10 @@ export const sessionAbortHandlers: GatewayRequestHandlers = {
         client,
         isWebchatConnect,
       },
-      onAuthorizedAfterQueuedAbort ? { onAuthorizedAfterQueuedAbort } : {},
+      {
+        ...(onAuthorizedAfterQueuedAbort ? { onAuthorizedAfterQueuedAbort } : {}),
+        ...(!requestedRunId ? { cascadeDescendants: true as const } : {}),
+      },
     );
     if (!chatAbortSucceeded) {
       return;
@@ -367,7 +442,7 @@ export const sessionAbortHandlers: GatewayRequestHandlers = {
     if (aborted) {
       emitSessionsChanged(context, {
         sessionKey: canonicalKey,
-        ...(canonicalKey === "global" && abortAgentId ? { agentId: abortAgentId } : {}),
+        ...(abortAgentId ? { agentId: abortAgentId } : {}),
         reason: "abort",
       });
     }

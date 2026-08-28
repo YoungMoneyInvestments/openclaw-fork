@@ -1,5 +1,4 @@
 // Runtime boundary for provider discovery through plugin entrypoints.
-import path from "node:path";
 import type { NormalizedModelCatalogRow } from "@openclaw/model-catalog-core/model-catalog-types";
 import { normalizeProviderId } from "@openclaw/model-catalog-core/provider-id";
 import { sortUniqueStrings } from "../../packages/normalization-core/src/string-normalization.js";
@@ -8,16 +7,11 @@ import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { planEffectiveModelCatalogRows } from "../model-catalog/index.js";
 import { loadManifestMetadataSnapshot } from "./manifest-contract-eligibility.js";
 import type { PluginManifestRecord } from "./manifest-registry.js";
-import { clearNativeRequireJavaScriptModuleCache } from "./native-module-require.js";
 import { withProfile } from "./plugin-load-profile.js";
-import { registerPluginMetadataProcessMemoLifecycleClear } from "./plugin-metadata-lifecycle.js";
 import type { PluginMetadataRegistryView } from "./plugin-metadata-snapshot.types.js";
-import {
-  createPluginModuleLoaderCache,
-  getCachedPluginModuleLoader,
-} from "./plugin-module-loader-cache.js";
+import { getCachedPluginModuleLoader } from "./plugin-module-loader-cache.js";
 import { resolveDiscoveredProviderPluginIds } from "./providers.js";
-import { resolvePluginProviders } from "./providers.runtime.js";
+import { resolvePluginProvidersCore } from "./providers.runtime.js";
 import type { ProviderPlugin } from "./types.js";
 
 type ProviderDiscoveryModule =
@@ -37,30 +31,6 @@ type ProviderDiscoveryEntryResult = {
   manifestEntryPluginIds: Set<string>;
   runtimeManifestCatalogPluginIds: Set<string>;
 };
-
-const providerDiscoveryModuleLoaders = createPluginModuleLoaderCache();
-const providerDiscoveryModuleRoots = new Map<string, string>();
-
-function resolveProviderDiscoveryDependencyRoot(rootDir: string): string {
-  const extensionsDir = path.dirname(rootDir);
-  const distDir = path.dirname(extensionsDir);
-  // Bundled dist provider entries import hoisted dist/*.js chunks outside
-  // dist/extensions/<plugin>; lifecycle clears must evict those chunks too.
-  if (path.basename(extensionsDir) === "extensions" && path.basename(distDir) === "dist") {
-    return distDir;
-  }
-  return rootDir;
-}
-
-function clearProviderDiscoveryModuleLoaders(): void {
-  providerDiscoveryModuleLoaders.clear();
-  for (const [modulePath, rootDir] of providerDiscoveryModuleRoots) {
-    clearNativeRequireJavaScriptModuleCache(modulePath, { dependencyRoot: rootDir });
-  }
-  providerDiscoveryModuleRoots.clear();
-}
-
-registerPluginMetadataProcessMemoLifecycleClear(clearProviderDiscoveryModuleLoaders);
 
 function normalizeDiscoveryModule(value: ProviderDiscoveryModule): ProviderPlugin[] {
   const resolved =
@@ -90,13 +60,9 @@ function loadProviderDiscoveryModule(params: {
   modulePath: string;
   rootDir: string;
 }): ProviderDiscoveryModule {
-  providerDiscoveryModuleRoots.set(
-    params.modulePath,
-    resolveProviderDiscoveryDependencyRoot(params.rootDir),
-  );
   const moduleLoader = getCachedPluginModuleLoader({
-    cache: providerDiscoveryModuleLoaders,
     modulePath: params.modulePath,
+    rootDir: params.rootDir,
     importerUrl: import.meta.url,
     loaderFilename: import.meta.url,
     preferBuiltDist: true,
@@ -132,26 +98,13 @@ function hasProviderAuthEnvCredential(
 function modelDefinitionCostFromManifestRow(
   row: NormalizedModelCatalogRow,
 ): ModelDefinitionConfig["cost"] {
-  if (
-    !row.cost ||
-    row.cost.input === undefined ||
-    row.cost.output === undefined ||
-    row.cost.cacheRead === undefined ||
-    row.cost.cacheWrite === undefined
-  ) {
-    return {
-      input: 0,
-      output: 0,
-      cacheRead: 0,
-      cacheWrite: 0,
-    };
-  }
+  const cost = row.cost;
   return {
-    input: row.cost.input,
-    output: row.cost.output,
-    cacheRead: row.cost.cacheRead,
-    cacheWrite: row.cost.cacheWrite,
-    ...(row.cost.tieredPricing ? { tieredPricing: row.cost.tieredPricing } : {}),
+    input: cost?.input ?? 0,
+    output: cost?.output ?? 0,
+    cacheRead: cost?.cacheRead ?? 0,
+    cacheWrite: cost?.cacheWrite ?? 0,
+    ...(cost?.tieredPricing ? { tieredPricing: cost.tieredPricing } : {}),
   };
 }
 
@@ -437,7 +390,6 @@ export function resolvePluginDiscoveryProvidersRuntime(params: {
   config?: OpenClawConfig;
   workspaceDir?: string;
   env?: NodeJS.ProcessEnv;
-  bundledProviderVitestCompat?: boolean;
   onlyPluginIds?: string[];
   includeUntrustedWorkspacePlugins?: boolean;
   requireCompleteDiscoveryEntryCoverage?: boolean;
@@ -447,7 +399,6 @@ export function resolvePluginDiscoveryProvidersRuntime(params: {
   pluginMetadataSnapshot?: PluginMetadataRegistryView;
 }): ProviderPlugin[] {
   const env = params.env ?? process.env;
-  const bundledProviderVitestCompat = params.bundledProviderVitestCompat ?? env.VITEST === "true";
   const entryResult = resolveProviderDiscoveryEntryPlugins({ ...params, env });
   const entryProviders = entryResult.providers.filter(
     (provider) =>
@@ -474,10 +425,9 @@ export function resolvePluginDiscoveryProvidersRuntime(params: {
     });
     const fullProviders =
       fullPluginIds.length > 0
-        ? resolvePluginProviders({
+        ? resolvePluginProvidersCore({
             ...params,
             env,
-            bundledProviderVitestCompat,
             onlyPluginIds: fullPluginIds,
           })
         : [];
@@ -493,10 +443,9 @@ export function resolvePluginDiscoveryProvidersRuntime(params: {
     ]);
     const fullProviders =
       fullPluginIds.length > 0
-        ? resolvePluginProviders({
+        ? resolvePluginProvidersCore({
             ...params,
             env,
-            bundledProviderVitestCompat,
             onlyPluginIds: fullPluginIds,
           })
         : [];
@@ -507,10 +456,9 @@ export function resolvePluginDiscoveryProvidersRuntime(params: {
   }
   const runtimeManifestCatalogPluginIds = listRuntimeManifestCatalogPluginIds(entryResult);
   if (runtimeManifestCatalogPluginIds.length > 0) {
-    return resolvePluginProviders({
+    return resolvePluginProvidersCore({
       ...params,
       env,
-      bundledProviderVitestCompat,
       onlyPluginIds: runtimeManifestCatalogPluginIds,
     });
   }
@@ -521,17 +469,15 @@ export function resolvePluginDiscoveryProvidersRuntime(params: {
         .filter((pluginId): pluginId is string => typeof pluginId === "string" && pluginId !== ""),
     );
     if (fullPluginIds.length > 0) {
-      return resolvePluginProviders({
+      return resolvePluginProvidersCore({
         ...params,
         env,
-        bundledProviderVitestCompat,
         onlyPluginIds: fullPluginIds,
       });
     }
   }
-  return resolvePluginProviders({
+  return resolvePluginProvidersCore({
     ...params,
     env,
-    bundledProviderVitestCompat,
   });
 }

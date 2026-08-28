@@ -357,6 +357,13 @@ public struct OpenClawChatSessionEntry: Codable, Identifiable, Sendable, Hashabl
     public var kind: String?
     public var displayName: String?
     public var derivedTitle: String?
+    /// Non-sensitive facts derived by the Gateway from the canonical session route.
+    public var classification: String?
+    public var agentId: String?
+    public var accountId: String?
+    public var peerKind: String?
+    public var isMain: Bool?
+    public var isBackground: Bool?
     public var label: String?
     public var category: String?
     public var pinned: Bool?
@@ -372,6 +379,7 @@ public struct OpenClawChatSessionEntry: Codable, Identifiable, Sendable, Hashabl
     public var space: String?
     public var updatedAt: Double?
     public var lastReadAt: Double?
+    public var markedUnreadAt: Double?
     public var lastInteractionAt: Double?
     public var lastActivityAt: Double?
     public var sessionId: String?
@@ -418,6 +426,12 @@ public struct OpenClawChatSessionEntry: Codable, Identifiable, Sendable, Hashabl
         key: String,
         kind: String?,
         displayName: String?,
+        classification: String? = nil,
+        agentId: String? = nil,
+        accountId: String? = nil,
+        peerKind: String? = nil,
+        isMain: Bool? = nil,
+        isBackground: Bool? = nil,
         surface: String?,
         subject: String?,
         room: String?,
@@ -448,6 +462,7 @@ public struct OpenClawChatSessionEntry: Codable, Identifiable, Sendable, Hashabl
         agentStatus: OpenClawChatSessionAgentStatus? = nil,
         observerDigest: OpenClawChatSessionObserverDigest? = nil,
         lastReadAt: Double? = nil,
+        markedUnreadAt: Double? = nil,
         lastInteractionAt: Double? = nil,
         lastActivityAt: Double? = nil,
         parentSessionKey: String? = nil,
@@ -476,6 +491,12 @@ public struct OpenClawChatSessionEntry: Codable, Identifiable, Sendable, Hashabl
         self.kind = kind
         self.displayName = displayName
         self.derivedTitle = derivedTitle
+        self.classification = classification
+        self.agentId = agentId
+        self.accountId = accountId
+        self.peerKind = peerKind
+        self.isMain = isMain
+        self.isBackground = isBackground
         self.label = label
         self.category = category
         self.pinned = pinned
@@ -491,6 +512,7 @@ public struct OpenClawChatSessionEntry: Codable, Identifiable, Sendable, Hashabl
         self.space = space
         self.updatedAt = updatedAt
         self.lastReadAt = lastReadAt
+        self.markedUnreadAt = markedUnreadAt
         self.lastInteractionAt = lastInteractionAt
         self.lastActivityAt = lastActivityAt
         self.sessionId = sessionId
@@ -568,12 +590,8 @@ public enum OpenClawChatSessionListOrganizer {
         let query = search.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !query.isEmpty else { return sessions }
         return sessions.filter { session in
-            for field in [session.displayName, session.label, session.subject, session.sessionId, session.key] {
-                if let field, field.lowercased().contains(query) {
-                    return true
-                }
-            }
-            return false
+            [session.displayName, session.label, session.subject, session.sessionId, session.category, session.key]
+                .contains { $0?.lowercased().contains(query) == true }
         }
     }
 }

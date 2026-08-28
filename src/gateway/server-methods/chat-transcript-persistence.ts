@@ -1,9 +1,13 @@
 // Transcript persistence and source-reply rewrites shared by chat send and abort.
-import { getReplyPayloadMetadata } from "../../auto-reply/reply-payload.js";
+import { asOptionalRecord as transcriptEventRecord } from "@openclaw/normalization-core/record-coerce";
+import {
+  appendReplyMediaFailureWarning,
+  getReplyPayloadMetadata,
+} from "../../auto-reply/reply-payload.js";
 import {
   findTranscriptEvent,
   loadTranscriptEventRowsAfterSeqSync,
-  patchSessionEntry,
+  patchSessionEntryCore,
   publishTranscriptUpdate,
   readSessionTranscriptWatermark,
   rewriteTranscriptEventRowsExact,
@@ -11,11 +15,11 @@ import {
   type SessionTranscriptWriteScope,
   type TranscriptEvent,
 } from "../../config/sessions/session-accessor.js";
+import { applyAssistantDeliveryDirectives } from "../../config/sessions/transcript-assistant-delivery.js";
 import { resolveMirroredTranscriptText } from "../../config/sessions/transcript-mirror.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { normalizeMediaReferenceForComparison } from "../../media/media-reference-comparison.js";
 import { splitMediaFromOutput } from "../../media/parse.js";
-import { stripInlineDirectiveTagsForDisplay } from "../../utils/directive-tags.js";
 import {
   sanitizeAssistantDisplayText,
   type AssistantDisplayContentBlock,
@@ -67,22 +71,13 @@ export function assistantTranscriptScope(
   };
 }
 
-function transcriptEventRecord(event: TranscriptEvent): Record<string, unknown> | undefined {
-  return event && typeof event === "object" && !Array.isArray(event)
-    ? (event as Record<string, unknown>)
-    : undefined;
-}
-
 function transcriptEventId(event: TranscriptEvent): string | undefined {
   const id = transcriptEventRecord(event)?.id;
   return typeof id === "string" && id.trim().length > 0 ? id : undefined;
 }
 
 function transcriptEventMessage(event: TranscriptEvent): Record<string, unknown> | undefined {
-  const message = transcriptEventRecord(event)?.message;
-  return message && typeof message === "object" && !Array.isArray(message)
-    ? (message as Record<string, unknown>)
-    : undefined;
+  return transcriptEventRecord(transcriptEventRecord(event)?.message);
 }
 
 function findAssistantTranscriptMessageByIdempotencyKeyInEvents(
@@ -152,7 +147,14 @@ function mergeManagedMediaIntoAssistantContent(params: {
     ? (params.message.content as AssistantDisplayContentBlock[])
     : [];
   const managedBlocks = params.replacement.filter((block) => block?.type !== "text");
-  if (managedBlocks.length === 0) {
+  const mediaFailureWarning = appendReplyMediaFailureWarning(undefined);
+  const preserveMediaFailureWarning = params.replacement.some(
+    (block) =>
+      block?.type === "text" &&
+      typeof block.text === "string" &&
+      block.text.includes(mediaFailureWarning),
+  );
+  if (managedBlocks.length === 0 && !preserveMediaFailureWarning) {
     return null;
   }
   let replaced = false;
@@ -163,18 +165,25 @@ function mergeManagedMediaIntoAssistantContent(params: {
       continue;
     }
     const split = splitMediaFromOutput(block.text);
-    const directiveTagsChanged = stripInlineDirectiveTagsForDisplay(split.text).changed;
     const visibleText = sanitizeAssistantDisplayText(split.text, {
-      preserveBoundaries: !directiveTagsChanged,
+      preserveBoundaries: true,
     });
     if (visibleText) {
       const { textSignature: _textSignature, ...rest } = block;
-      merged.push({ ...rest, text: visibleText });
+      merged.push({
+        ...rest,
+        text: preserveMediaFailureWarning
+          ? appendReplyMediaFailureWarning(visibleText)
+          : visibleText,
+      });
     }
     if (split.mediaUrls?.length && !replaced) {
       merged.push(...managedBlocks);
       replaced = true;
     }
+  }
+  if (replaced && preserveMediaFailureWarning && merged.length === 0) {
+    merged.push({ type: "text", text: mediaFailureWarning });
   }
   return replaced ? merged : null;
 }
@@ -273,7 +282,7 @@ export async function appendAssistantTranscriptMessage(params: {
   idempotencyKey?: string;
   abortMeta?: {
     aborted: true;
-    origin: "rpc" | "stop-command";
+    origin: "rpc" | "stop-command" | "placement-abandon";
     runId: string;
   };
   ttsSupplement?: GatewayInjectedTtsSupplementMarker;
@@ -310,7 +319,7 @@ async function touchAssistantTranscriptSessionEntry(
     return;
   }
   const transcriptMarkerUpdatedAt = Date.now();
-  await patchSessionEntry(
+  await patchSessionEntryCore(
     {
       storePath: scope.storePath,
       sessionKey: scope.sessionKey,
@@ -489,11 +498,12 @@ export async function rewriteAssistantTranscriptMessageByTurnIndexAndMedia(param
   if (!mergedContent) {
     return null;
   }
+  const rewrittenMessage = applyAssistantDeliveryDirectives({
+    ...target.message,
+    content: mergedContent,
+  });
   const rewrittenEvent = Object.assign({}, targetRow.event as Record<string, unknown>, {
-    message: {
-      ...target.message,
-      content: mergedContent,
-    },
+    message: rewrittenMessage,
   });
   const rewritten = await rewriteTranscriptEventRowsExact(params.scope, {
     allowInitialGenerationMaterialization: initialGenerationMaterialized,

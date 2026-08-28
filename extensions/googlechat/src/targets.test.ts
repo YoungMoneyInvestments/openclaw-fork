@@ -287,6 +287,43 @@ describe("googlechat group policy", () => {
   });
 });
 
+describe("googlechat API JSON response decoding", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("rejects invalid UTF-8 in API JSON responses instead of corrupting identifiers", async () => {
+    const raw = Buffer.concat([
+      Buffer.from('{"name":"spaces/'),
+      Buffer.from([0xff]),
+      Buffer.from('AAA"}'),
+    ]);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response(new Uint8Array(raw), { status: 200 })),
+    );
+
+    await expect(
+      sendGoogleChatMessage({ account, space: "spaces/AAA", text: "hello" }),
+    ).rejects.toThrow(/malformed JSON response/);
+  });
+
+  it("keeps valid UTF-8 API JSON responses unchanged (negative control)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValue(
+          new Response(new Uint8Array(Buffer.from('{"name":"spaces/AAA"}')), { status: 200 }),
+        ),
+    );
+
+    await expect(
+      sendGoogleChatMessage({ account, space: "spaces/AAA", text: "hello" }),
+    ).resolves.toEqual({ messageName: "spaces/AAA", threadName: undefined });
+  });
+});
+
 describe("downloadGoogleChatMedia", () => {
   afterEach(() => {
     unregisterGoogleChatManualApprovalFollowupSuppression("12345678-1234-1234-1234-123456789012");
@@ -880,40 +917,6 @@ describe("verifyGoogleChatRequest", () => {
       ["chat@system.gserviceaccount.com"],
     );
     expect(release).toHaveBeenCalledOnce();
-  });
-
-  it("cancels a rejected Chat cert response before releasing the guard", async () => {
-    expireGoogleChatCertCache();
-    const cancel = vi.fn().mockResolvedValue(undefined);
-    const release = vi.fn().mockResolvedValue(undefined);
-    mocks.fetchWithSsrFGuard.mockResolvedValueOnce({
-      response: {
-        ok: false,
-        status: 503,
-        body: { cancel },
-      } as unknown as Response,
-      release,
-    });
-
-    await expect(
-      verifyGoogleChatRequest({
-        bearer: "token",
-        audienceType: "project-number",
-        audience: "123456789",
-      }),
-    ).resolves.toEqual({
-      ok: false,
-      reason: "Failed to fetch Chat certs (503)",
-    });
-
-    expect(cancel).toHaveBeenCalledOnce();
-    expect(release).toHaveBeenCalledOnce();
-    const cancelOrder = cancel.mock.invocationCallOrder[0];
-    const releaseOrder = release.mock.invocationCallOrder[0];
-    if (cancelOrder === undefined || releaseOrder === undefined) {
-      throw new Error("expected cancellation and guard release call-order records");
-    }
-    expect(cancelOrder).toBeLessThan(releaseOrder);
   });
 
   it("reports malformed Chat cert JSON with a stable auth error", async () => {

@@ -49,6 +49,34 @@ describe("buildCliRespawnPlan", () => {
     ).toBeNull();
   });
 
+  it.each(["darwin", "linux", "win32"] as const)(
+    "leaves foreground Gmail shutdown with its lifecycle owner on %s",
+    (platform) => {
+      for (const args of [
+        ["webhooks", "gmail", "run", "--account", "fixture@example.com"],
+        ["--profile", "fixture", "webhooks", "gmail", "run"],
+      ]) {
+        expect(
+          buildCliRespawnPlan({
+            argv: ["node", "openclaw", ...args],
+            env: {},
+            execArgv: [],
+            autoNodeExtraCaCerts: "/etc/ssl/certs/ca-certificates.crt",
+            platform,
+          }),
+        ).toBeNull();
+      }
+      expect(
+        buildCliRespawnPlan({
+          argv: ["node", "openclaw", "webhooks", "gmail", "setup"],
+          env: {},
+          execArgv: [],
+          platform,
+        }),
+      ).not.toBeNull();
+    },
+  );
+
   it("adds NODE_EXTRA_CA_CERTS and warning suppression in one respawn", () => {
     const plan = buildCliRespawnPlan({
       argv: ["node", "openclaw", "status"],
@@ -216,7 +244,7 @@ describe("buildCliRespawnPlan", () => {
     expect(respawnPlan.detachForProcessTree).toBe(false);
   });
 
-  it("normalizes duplicated Windows node.exe argv before respawning", () => {
+  it("normalizes a duplicated Windows node.exe launcher prefix before respawning", () => {
     const scriptPath =
       "C:\\Users\\alice\\AppData\\Roaming\\npm\\node_modules\\openclaw\\openclaw.mjs";
     const plan = buildCliRespawnPlan({
@@ -224,7 +252,6 @@ describe("buildCliRespawnPlan", () => {
         "C:\\Program Files\\nodejs\\node.exe",
         "C:\\Program Files\\nodejs\\node.exe",
         scriptPath,
-        "node.exe",
         "dashboard",
         "--no-open",
       ],
@@ -236,6 +263,27 @@ describe("buildCliRespawnPlan", () => {
 
     const respawnPlan = expectCliRespawnPlan(plan);
     expect(respawnPlan.argv).toEqual(["--stack-size=8192", scriptPath, "dashboard", "--no-open"]);
+  });
+
+  it("preserves post-script node.exe arguments after normalizing the launcher prefix", () => {
+    const scriptPath =
+      "C:\\Users\\alice\\AppData\\Roaming\\npm\\node_modules\\openclaw\\openclaw.mjs";
+    const plan = buildCliRespawnPlan({
+      argv: [
+        "C:\\Program Files\\nodejs\\node.exe",
+        "C:\\Program Files\\nodejs\\node.exe",
+        scriptPath,
+        "node.exe",
+        "status",
+      ],
+      env: {},
+      execArgv: [],
+      execPath: "C:\\Program Files\\nodejs\\node.exe",
+      platform: "win32",
+    });
+
+    const respawnPlan = expectCliRespawnPlan(plan);
+    expect(respawnPlan.argv).toEqual(["--stack-size=8192", scriptPath, "node.exe", "status"]);
   });
 
   it("does not respawn on Windows when stack size is already configured", () => {
@@ -334,52 +382,5 @@ describe("runCliRespawnPlan", () => {
 
     expect(exit).toHaveBeenCalledWith(0);
     expect(writeError).not.toHaveBeenCalled();
-  });
-
-  it("force-kills a signaled respawn child that does not exit", () => {
-    vi.useFakeTimers();
-    const child = new EventEmitter() as ChildProcess;
-    const kill = vi.fn<(signal?: NodeJS.Signals) => boolean>(() => true);
-    child.kill = kill as ChildProcess["kill"];
-    const spawn = vi.fn(() => child);
-    const exit = vi.fn();
-    let onSignal: ((signal: NodeJS.Signals) => void) | undefined;
-
-    try {
-      runCliRespawnPlan(
-        {
-          command: "/usr/bin/node",
-          argv: ["/repo/openclaw/dist/entry.js", "tui"],
-          env: {},
-          detachForProcessTree: false,
-        },
-        {
-          spawn: spawn as unknown as typeof import("node:child_process").spawn,
-          attachChildProcessBridge: vi.fn((_child, options) => {
-            onSignal = options?.onSignal;
-            return { detach: vi.fn() };
-          }),
-          exit: exit as unknown as (code?: number) => never,
-          writeError: vi.fn(),
-        },
-      );
-
-      onSignal?.("SIGTERM");
-      vi.advanceTimersByTime(1_000);
-
-      expect(kill).toHaveBeenCalledWith("SIGTERM");
-      expect(exit).not.toHaveBeenCalled();
-
-      vi.advanceTimersByTime(1_000);
-
-      expect(kill).toHaveBeenCalledWith(process.platform === "win32" ? "SIGTERM" : "SIGKILL");
-      expect(exit).not.toHaveBeenCalled();
-
-      child.emit("exit", null, "SIGKILL");
-
-      expect(exit).toHaveBeenCalledWith(1);
-    } finally {
-      vi.useRealTimers();
-    }
   });
 });

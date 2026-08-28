@@ -9,7 +9,7 @@ import { encodeSessionArchiveContent } from "../config/sessions/archive-compress
 import {
   appendTranscriptMessage,
   persistSessionTranscriptTurn,
-  upsertSessionEntry,
+  upsertSessionEntryCore,
 } from "../config/sessions/session-accessor.js";
 import type { SessionEntry } from "../config/sessions/types.js";
 import {
@@ -220,7 +220,7 @@ describe("session cost usage", () => {
         ...sessionTarget,
         sessionKey: "agent:main:mapped-other-cost",
       };
-      await upsertSessionEntry(
+      await upsertSessionEntryCore(
         {
           agentId: "main",
           sessionKey: mismatchedTarget.sessionKey,
@@ -267,6 +267,23 @@ describe("session cost usage", () => {
           sessionTarget,
         }),
       ).toContain("sqlite:main:");
+    });
+  });
+
+  it.each(["main", "opus"])("validates the owner of a legacy %s entry marker", async (agentId) => {
+    const root = await makeSessionCostRoot("entry-marker-owner");
+    const sessionId = "shared";
+    const marker = `sqlite:${agentId}:${sessionId}:${path.join(root, "agents", agentId, "sessions", "sessions.json")}`;
+    await withStateDir(root, async () => {
+      expect(
+        resolveExistingUsageSessionFile({
+          agentId: "main",
+          sessionId,
+          sessionEntry: { sessionId, updatedAt: 1, sessionFile: marker } as SessionEntry & {
+            sessionFile: string;
+          },
+        }),
+      ).toBe(agentId === "main" ? marker : undefined);
     });
   });
 
@@ -463,7 +480,7 @@ describe("session cost usage", () => {
     const sessionFile = `sqlite:main:${sessionId}:${storePath}`;
 
     await withStateDir(root, async () => {
-      await upsertSessionEntry({ sessionKey, storePath }, { sessionId, updatedAt: now });
+      await upsertSessionEntryCore({ sessionKey, storePath }, { sessionId, updatedAt: now });
       await persistSessionTranscriptTurn(
         { agentId: "main", sessionId, sessionKey, storePath },
         {
@@ -725,7 +742,6 @@ describe("session cost usage", () => {
         const row = readSessionCostUsageRollupRows("main").find(
           (candidate) => candidate.key === sessionFile,
         );
-        expect(row).toBeDefined();
         expect(Buffer.byteLength(row?.valueJson ?? "")).toBeLessThan(32 * 1024);
         expect(JSON.parse(row?.valueJson ?? "null")).toMatchObject({
           pricingFingerprint,
@@ -1032,23 +1048,18 @@ describe("session cost usage", () => {
 
     await withStateDir(root, async () => {
       const session = { sessionId: "sess-batch-range", sessionFile };
-      await loadSessionCostSummariesFromCache({ sessions: [session], agentId: "main" });
+      await refreshSessionCostUsageForTest(sessionFile);
       const rangeEndMs = Date.UTC(2026, 1, 5) + 24 * 60 * 60 * 1000 - 1;
-      await waitForFast(
-        async () => {
-          const ranged = await loadSessionCostSummariesFromCache({
-            sessions: [session],
-            agentId: "main",
-            startMs: Date.UTC(2026, 1, 5),
-            endMs: rangeEndMs,
-            requestRefresh: false,
-          });
-          expect(ranged.cacheStatus.status).toBe("fresh");
-          expect(ranged.summaries[0]?.totalTokens).toBe(20);
-          expect(ranged.summaries[0]?.modelUsage?.map((entry) => entry.model)).toEqual(["gpt-5.5"]);
-        },
-        { interval: 10, timeout: 2_000 },
-      );
+      const ranged = await loadSessionCostSummariesFromCache({
+        sessions: [session],
+        agentId: "main",
+        startMs: Date.UTC(2026, 1, 5),
+        endMs: rangeEndMs,
+        requestRefresh: false,
+      });
+      expect(ranged.cacheStatus.status).toBe("fresh");
+      expect(ranged.summaries[0]?.totalTokens).toBe(20);
+      expect(ranged.summaries[0]?.modelUsage?.map((entry) => entry.model)).toEqual(["gpt-5.5"]);
 
       const cachedEntry = readSessionCostUsageRollupRows("main").find(
         (row) => row.key === sessionFile,

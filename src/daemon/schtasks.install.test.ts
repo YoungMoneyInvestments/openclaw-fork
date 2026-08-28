@@ -106,6 +106,54 @@ describe("installScheduledTask", () => {
     expect(schtasksCalls[index]).toEqual(["/Run", "/TN", taskName]);
   }
 
+  it("redirects stdin from NUL so a hidden service console is never interactive (#112173)", async () => {
+    await withUserProfileDir(async (_tmpDir, env) => {
+      const { scriptPath } = await installDefaultGatewayTask(env);
+      const script = decodeWindowsLauncherScript({ buffer: await fs.readFile(scriptPath) });
+      expect(script).toContain("node gateway.js < NUL");
+
+      const parsed = await readScheduledTaskCommand(env);
+      expect(parsed).toStrictEqual({
+        programArguments: ["node", "gateway.js"],
+        sourcePath: scriptPath,
+      });
+    });
+  });
+
+  it("writes version-free gateway and node descriptions", async () => {
+    await withUserProfileDir(async (_tmpDir, env) => {
+      const gateway = await installDefaultGatewayTask(env);
+      const gatewayScript = decodeWindowsLauncherScript({
+        buffer: await fs.readFile(gateway.scriptPath),
+      });
+      expect(gatewayScript).toContain("rem OpenClaw Gateway");
+      expect(gatewayScript).not.toContain("OPENCLAW_SERVICE_VERSION");
+      expect(xmlPayloadCaptures.at(-1)?.xml).toContain(
+        "<Description>OpenClaw Gateway</Description>",
+      );
+
+      const node = await installScheduledTask({
+        env: {
+          ...env,
+          OPENCLAW_WINDOWS_TASK_NAME: "OpenClaw Node",
+          OPENCLAW_TASK_SCRIPT_NAME: "node.cmd",
+        },
+        stdout: new PassThrough(),
+        programArguments: ["node", "node-host.js"],
+        description: "OpenClaw Node Host",
+        environment: {},
+      });
+      const nodeScript = decodeWindowsLauncherScript({
+        buffer: await fs.readFile(node.scriptPath),
+      });
+      expect(nodeScript).toContain("rem OpenClaw Node Host");
+      expect(nodeScript).not.toContain("OPENCLAW_SERVICE_VERSION");
+      expect(xmlPayloadCaptures.at(-1)?.xml).toContain(
+        "<Description>OpenClaw Node Host</Description>",
+      );
+    });
+  });
+
   it("writes quoted set assignments and escapes metacharacters", async () => {
     await withUserProfileDir(async (_tmpDir, env) => {
       const { scriptPath } = await installScheduledTask({
@@ -127,8 +175,10 @@ describe("installScheduledTask", () => {
           OC_CARET: "a^b",
           OC_PERCENT: "%TEMP%",
           OC_BANG: "!token!",
+          OC_SOURCE_PATH: "C:\\OpenClaw source & ^ %USERPROFILE%!",
           OC_QUOTE: 'he said "hi"',
           OC_EMPTY: "",
+          NODE_OPTIONS: "",
         },
       });
 
@@ -141,8 +191,10 @@ describe("installScheduledTask", () => {
       expect(script).toContain('set "OC_CARET=a^^b"');
       expect(script).toContain('set "OC_PERCENT=%%TEMP%%"');
       expect(script).toContain('set "OC_BANG=^!token^!"');
+      expect(script).toContain('set "OC_SOURCE_PATH=C:\\OpenClaw source & ^^ %%USERPROFILE%%^!"');
       expect(script).toContain('set "OC_QUOTE=he said ^"hi^""');
       expect(script).not.toContain('set "OC_EMPTY=');
+      expect(script).toContain('set "NODE_OPTIONS="');
       expect(script).not.toContain("set OC_INJECT=");
 
       const parsed = await readScheduledTaskCommand(env);
@@ -163,14 +215,18 @@ describe("installScheduledTask", () => {
           OC_CARET: "a^b",
           OC_PERCENT: "%TEMP%",
           OC_BANG: "!token!",
+          OC_SOURCE_PATH: "C:\\OpenClaw source & ^ %USERPROFILE%!",
           OC_QUOTE: 'he said "hi"',
+          NODE_OPTIONS: "",
         },
         environmentValueSources: {
           OC_INJECT: "inline",
           OC_CARET: "inline",
           OC_PERCENT: "inline",
           OC_BANG: "inline",
+          OC_SOURCE_PATH: "inline",
           OC_QUOTE: "inline",
+          NODE_OPTIONS: "inline",
         },
         sourcePath: scriptPath,
       });
@@ -381,6 +437,20 @@ describe("installScheduledTask", () => {
         } catch {}
       }
       expect(remaining).toEqual([]);
+    });
+  });
+
+  it("preserves task scripts when Scheduled Task deletion fails", async () => {
+    await withUserProfileDir(async (_tmpDir, env) => {
+      schtasksResponses.push(okSchtasksResponse, okSchtasksResponse, accessDeniedResponse);
+      const scriptPath = resolveTaskScriptPath(env);
+      await fs.mkdir(path.dirname(scriptPath), { recursive: true });
+      await fs.writeFile(scriptPath, "@echo off\n", "utf8");
+
+      await expect(uninstallScheduledTask({ env, stdout: new PassThrough() })).rejects.toThrow(
+        "schtasks delete failed: ERROR: Access is denied.",
+      );
+      await expect(fs.access(scriptPath)).resolves.toBeUndefined();
     });
   });
 

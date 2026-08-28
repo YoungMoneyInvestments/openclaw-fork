@@ -5,6 +5,7 @@ import { selectStyled } from "../../../packages/terminal-core/src/prompt-select-
 import { stylePromptMessage } from "../../../packages/terminal-core/src/prompt-style.js";
 import { theme } from "../../../packages/terminal-core/src/theme.js";
 import { readConfigFileSnapshot } from "../../config/config.js";
+import { formatErrorMessage } from "../../infra/errors.js";
 import {
   formatUpdateChannelLabel,
   normalizeUpdateChannel,
@@ -13,6 +14,7 @@ import {
 import { checkUpdateStatus } from "../../infra/update-check.js";
 import { defaultRuntime } from "../../runtime.js";
 import { pathExists } from "../../utils.js";
+import { VERSION } from "../../version.js";
 import {
   isEmptyDir,
   isGitCheckout,
@@ -46,7 +48,7 @@ export async function updateWizardCommand(opts: UpdateWizardOptions = {}): Promi
       fetchGit: false,
       includeRegistry: false,
     }),
-    readConfigFileSnapshot(),
+    readConfigFileSnapshot({ observe: false }),
   ]);
 
   const configChannel = configSnapshot.valid
@@ -54,6 +56,7 @@ export async function updateWizardCommand(opts: UpdateWizardOptions = {}): Promi
     : null;
   const channelInfo = resolveEffectiveUpdateChannel({
     configChannel,
+    currentVersion: VERSION,
     installKind: updateStatus.installKind,
     git: updateStatus.git
       ? { tag: updateStatus.git.tag, branch: updateStatus.git.branch }
@@ -151,9 +154,10 @@ export async function updateWizardCommand(opts: UpdateWizardOptions = {}): Promi
       channel: requestedChannel ?? undefined,
       restart,
       timeout: opts.timeout,
+      acceptCapabilities: opts.acceptCapabilities,
     });
   } catch (err) {
-    defaultRuntime.error(String(err));
+    defaultRuntime.error(formatErrorMessage(err));
     defaultRuntime.exit(1);
   }
 }

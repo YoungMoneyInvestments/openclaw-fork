@@ -23,6 +23,7 @@ import {
   getConsoleMessagesViaPlaywright,
   getNetworkRequestsViaPlaywright,
   getPageErrorsViaPlaywright,
+  getPageTextViaPlaywright,
 } from "./pw-tools-core.activity.js";
 import {
   armDialogViaPlaywright,
@@ -31,7 +32,6 @@ import {
   uploadViaPlaywright,
   waitForDownloadViaPlaywright,
 } from "./pw-tools-core.downloads.js";
-import { pageContentViaPlaywright } from "./pw-tools-core.extract.js";
 import {
   batchViaPlaywright,
   clickViaPlaywright,
@@ -119,10 +119,10 @@ export const pwAi = {
   getConsoleMessagesViaPlaywright,
   getNetworkRequestsViaPlaywright,
   getPageErrorsViaPlaywright,
+  getPageTextViaPlaywright,
   highlightViaPlaywright,
   hoverViaPlaywright,
   navigateViaPlaywright,
-  pageContentViaPlaywright,
   pdfViaPlaywright,
   pressKeyViaPlaywright,
   resizeViewportViaPlaywright,

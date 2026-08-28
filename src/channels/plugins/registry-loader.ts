@@ -14,7 +14,7 @@ type ChannelRegistryValueResolver<TValue> = (
 ) => TValue | undefined;
 
 /**
- * Creates a lazy loader that resolves one value from the active channel registry.
+ * Creates a lazy loader that resolves one value from the authoritative channel registry.
  */
 export function createChannelRegistryLoader<TValue>(
   resolveValue: ChannelRegistryValueResolver<TValue>,

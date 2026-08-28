@@ -74,6 +74,67 @@ describe("command-path-policy", () => {
     });
   });
 
+  it("keeps built-in node RPCs off the config guard", () => {
+    for (const subcommand of ["status", "list"]) {
+      expectResolvedPolicy(["nodes", subcommand], {
+        configGuard: "skip",
+        networkProxy: "bypass",
+      });
+    }
+    for (const subcommand of [
+      "describe",
+      "pending",
+      "approve",
+      "reject",
+      "remove",
+      "rename",
+      "invoke",
+      "notify",
+      "push",
+      "camera",
+      "screen",
+      "location",
+    ]) {
+      expectResolvedPolicy(["nodes", subcommand], {
+        configGuard: "validate",
+        networkProxy: "bypass",
+      });
+    }
+    // Bare `openclaw nodes` still resolves plugin subcommands from validated config.
+    expectResolvedPolicy(["nodes"], { networkProxy: "bypass" });
+    expectResolvedPolicy(["nodes", "pair"], { networkProxy: "bypass" });
+  });
+
+  it("keeps gateway-owned node and device mutations off the local config guard", () => {
+    for (const subcommand of [
+      "list",
+      "join-code",
+      "approve",
+      "reject",
+      "remove",
+      "clear",
+      "rename",
+      "rotate",
+      "revoke",
+    ]) {
+      const commandPath = ["devices", subcommand];
+      expectResolvedPolicy(commandPath, {
+        configGuard: "validate",
+        networkProxy: "bypass",
+      });
+    }
+  });
+
+  it("keeps gateway control RPCs on core-only config validation", () => {
+    for (const subcommand of ["call", "restart", "suspend", "resume"]) {
+      expectResolvedPolicy(["gateway", subcommand], {
+        configGuard: "validate",
+        loadPlugins: "never",
+        networkProxy: "bypass",
+      });
+    }
+  });
+
   it("applies exact overrides after broader channel plugin rules", () => {
     expectResolvedPolicy(["channels", "send"], {
       loadPlugins: "always",
@@ -230,19 +291,63 @@ describe("command-path-policy", () => {
 
   it.each([
     ["approvals", "pending"],
-    ["commitments"],
     ["skills"],
     ["skills", "list"],
     ["skills", "check"],
+    ["gateway", "diagnostics", "export"],
     ["gateway", "stability"],
     ["gateway", "usage-cost"],
   ])("keeps read-only cold path %s out of startup config and plugins", (...commandPath) => {
     expectResolvedPolicy(commandPath, {
       configGuard: "skip",
       loadPlugins: "never",
-      ...(commandPath[0] === "commitments" ? { ensureCliPath: false } : {}),
       networkProxy: "bypass",
     });
+  });
+
+  it("loads only sandbox backend owner plugins for runtime commands", () => {
+    const sandboxPolicy = resolveCliCommandPathPolicy(["sandbox"]);
+    expectLoadPluginsResolver(sandboxPolicy);
+    expect(sandboxPolicy.pluginRegistry).toEqual({ scope: "sandbox-backends" });
+
+    for (const commandPath of [["sandbox", "explain"]]) {
+      expect(resolveCliCommandPathPolicy(commandPath).pluginRegistry).toEqual({
+        scope: "sandbox-backends",
+      });
+      expect(
+        sandboxPolicy.loadPlugins({
+          argv: ["node", "openclaw", ...commandPath],
+          commandPath,
+          jsonOutputMode: false,
+        }),
+      ).toBe(true);
+    }
+
+    for (const commandPath of [
+      ["sandbox", "list"],
+      ["sandbox", "recreate"],
+    ]) {
+      expect(resolveCliCommandPathPolicy(commandPath).pluginRegistry).toEqual({
+        scope: "sandbox-management",
+      });
+    }
+  });
+
+  it.each([
+    ["list", ["--browser"]],
+    ["recreate", ["--browser", "--all"]],
+    ["recreate", ["--all", "--browser"]],
+  ])("keeps browser-only sandbox %s independent of plugin activation", (subcommand, flags) => {
+    const policy = resolveCliCommandPathPolicy(["sandbox", subcommand]);
+    expectLoadPluginsResolver(policy);
+
+    expect(
+      policy.loadPlugins({
+        argv: ["node", "openclaw", "sandbox", subcommand, ...flags],
+        commandPath: ["sandbox", subcommand],
+        jsonOutputMode: false,
+      }),
+    ).toBe(false);
   });
 
   it("resolves mixed startup-only rules", () => {
@@ -254,6 +359,11 @@ describe("command-path-policy", () => {
     expectResolvedPolicy(["worker"], {
       configGuard: "skip",
       loadPlugins: "never",
+      hideBanner: true,
+      ownsProtocolStdout: true,
+      networkProxy: "bypass",
+    });
+    expectResolvedPolicy(["browser", "extension", "native-host"], {
       hideBanner: true,
       ownsProtocolStdout: true,
       networkProxy: "bypass",
@@ -363,18 +473,19 @@ describe("command-path-policy", () => {
         networkProxy: "bypass",
       });
     }
-    for (const commandPath of [
-      ["skills", "search"],
-      ["memory", "search"],
-    ]) {
-      expectResolvedPolicy(commandPath, {
-        configGuard: "skip",
-        loadPlugins: "never",
-      });
-    }
+    expectResolvedPolicy(["skills", "search"], {
+      configGuard: "skip",
+      loadPlugins: "never",
+    });
+    expectResolvedPolicy(["memory", "search"], {
+      configGuard: "skip",
+      loadPlugins: "always",
+      pluginRegistry: { scope: "memory" },
+    });
     const memoryStatusPolicy = resolveCliCommandPathPolicy(["memory", "status"]);
     expectConfigGuardResolver(memoryStatusPolicy);
-    expect(memoryStatusPolicy.loadPlugins).toBe("never");
+    expect(memoryStatusPolicy.loadPlugins).toBe("always");
+    expect(memoryStatusPolicy.pluginRegistry).toEqual({ scope: "memory" });
     expect(
       memoryStatusPolicy.configGuard({
         argv: ["node", "openclaw", "memory", "status"],
@@ -434,6 +545,20 @@ describe("command-path-policy", () => {
     expect(resolveCliNetworkProxyPolicy(["node", "openclaw", "models", "status", "--probe"])).toBe(
       "default",
     );
+    expect(resolveCliNetworkProxyPolicy(["node", "openclaw", "models", "--json"])).toBe("bypass");
+    expect(
+      resolveCliNetworkProxyPolicy([
+        "node",
+        "openclaw",
+        "models",
+        "--agent",
+        "main",
+        "--status-json",
+      ]),
+    ).toBe("bypass");
+    expect(
+      resolveCliNetworkProxyPolicy(["node", "openclaw", "models", "--agent", "main", "auth"]),
+    ).toBe("default");
     expect(resolveCliNetworkProxyPolicy(["node", "openclaw", "skills", "info", "browser"])).toBe(
       "bypass",
     );

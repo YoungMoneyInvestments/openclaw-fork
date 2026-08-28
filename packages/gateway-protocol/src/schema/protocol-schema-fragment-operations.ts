@@ -1,9 +1,11 @@
 import * as auditActivity from "./audit-activity.js";
+import * as auditRun from "./audit-run.js";
 import * as audit from "./audit.js";
 import * as config from "./config.js";
 import * as openclaw from "./openclaw.js";
 import * as taskSuggestions from "./task-suggestions.js";
 import * as tasks from "./tasks.js";
+import * as users from "./users.js";
 import * as wizard from "./wizard.js";
 
 export const OperationsProtocolSchemas = {
@@ -14,9 +16,20 @@ export const OperationsProtocolSchemas = {
   AuditActivityEventV1: auditActivity.AuditActivityEventV1Schema,
   AuditActivityListParams: auditActivity.AuditActivityListParamsSchema,
   AuditActivityListResult: auditActivity.AuditActivityListResultSchema,
+  ExecutionIdentityContextV1: auditRun.ExecutionIdentityContextV1Schema,
+  DecisionReceiptV1: auditRun.DecisionReceiptV1Schema,
+  DecisionReceiptDisplayV1: auditRun.DecisionReceiptDisplayV1Schema,
+  AuditRunIdentityPresentV1: auditRun.AuditRunIdentityPresentV1Schema,
+  AuditRunIdentityUnknownV1: auditRun.AuditRunIdentityUnknownV1Schema,
+  AuditRunIdentityUnsupportedV1: auditRun.AuditRunIdentityUnsupportedV1Schema,
+  AuditRunIdentityAmbiguousV1: auditRun.AuditRunIdentityAmbiguousV1Schema,
+  AuditRunIdentityV1: auditRun.AuditRunIdentityV1Schema,
+  AuditRunInspectParams: auditRun.AuditRunInspectParamsSchema,
+  AuditRunInspectResult: auditRun.AuditRunInspectResultSchema,
   AuditEvent: audit.AuditEventSchema,
   AuditListParams: audit.AuditListParamsSchema,
   AuditListResult: audit.AuditListResultSchema,
+  UsersPrefsChangedEvent: users.UsersPrefsChangedEventSchema,
   TaskSuggestion: taskSuggestions.TaskSuggestionSchema,
   TaskSuggestionEvent: taskSuggestions.TaskSuggestionEventSchema,
   TaskSuggestionResolution: taskSuggestions.TaskSuggestionResolutionSchema,
@@ -35,6 +48,8 @@ export const OperationsProtocolSchemas = {
   TasksGetResult: tasks.TasksGetResultSchema,
   TasksCancelParams: tasks.TasksCancelParamsSchema,
   TasksCancelResult: tasks.TasksCancelResultSchema,
+  TasksRecoveryParams: tasks.TasksRecoveryParamsSchema,
+  TasksRecoveryResult: tasks.TasksRecoveryResultSchema,
   ConfigGetParams: config.ConfigGetParamsSchema,
   ConfigSetParams: config.ConfigSetParamsSchema,
   ConfigApplyParams: config.ConfigApplyParamsSchema,

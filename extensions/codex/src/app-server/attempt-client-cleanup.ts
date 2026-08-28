@@ -2,6 +2,7 @@
  * Best-effort cleanup helpers for Codex app-server startup attempts and turns.
  */
 import { embeddedAgentLog } from "openclaw/plugin-sdk/agent-harness-runtime";
+import { unsubscribeCodexAppServerLiveThread } from "./client-runtime.js";
 import { CodexAppServerRpcError, type CodexAppServerClient } from "./client.js";
 import { retireSharedCodexAppServerClientIfCurrent } from "./shared-client.js";
 import { getCodexAppServerTurnRouter } from "./turn-router.js";
@@ -143,16 +144,19 @@ export async function unsubscribeCodexThreadBestEffort(
   params: {
     threadId: string;
     timeoutMs: number;
+    assertCurrent?: () => void;
   },
 ): Promise<boolean> {
   try {
-    await client.request(
-      "thread/unsubscribe",
-      { threadId: params.threadId },
-      { timeoutMs: params.timeoutMs },
+    await unsubscribeCodexAppServerLiveThread(
+      client,
+      params.threadId,
+      params.timeoutMs,
+      params.assertCurrent,
     );
     return true;
   } catch (error) {
+    params.assertCurrent?.();
     embeddedAgentLog.debug("codex app-server thread unsubscribe cleanup failed", {
       threadId: params.threadId,
       error,

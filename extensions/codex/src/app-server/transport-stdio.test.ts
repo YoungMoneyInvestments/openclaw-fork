@@ -33,6 +33,55 @@ describe("createStdioTransport", () => {
       expect.objectContaining({ cwd: "/srv/codex-project" }),
     );
   });
+
+  it("preserves wrapper prefixes, root option values, and raw override ordering", () => {
+    const overrides = ["-c", 'developer_instructions="app-server = literal"'];
+    const args = [
+      "/wrapper.js",
+      ...overrides,
+      "--profile",
+      "app-server",
+      "app-server",
+      "--listen",
+      "stdio://",
+      "--config=model_reasoning_effort=high",
+    ];
+    createStdioTransport({ ...startOptions("node"), args });
+
+    expect(spawnMock).toHaveBeenCalledWith(
+      "node",
+      [
+        "/wrapper.js",
+        ...overrides,
+        "--profile",
+        "app-server",
+        "--config=model_reasoning_effort=high",
+        "app-server",
+        "--listen",
+        "stdio://",
+      ],
+      expect.any(Object),
+    );
+    expect(args[1]).toBe("-c");
+  });
+
+  it("does not reinterpret a wrapper's positional arguments after --", () => {
+    const args = ["/wrapper.js", "--", "-c", "opaque", "app-server"];
+    createStdioTransport({ ...startOptions("node"), args });
+    expect(spawnMock).toHaveBeenCalledWith("node", args, expect.any(Object));
+  });
+
+  it.each(["--ws-issuer", "--ws-audience"])("preserves a subcommand-shaped %s value", (flag) => {
+    createStdioTransport({
+      ...startOptions("codex"),
+      args: ["app-server", flag, "app-server", "-c", "model_reasoning_effort=high"],
+    });
+    expect(spawnMock).toHaveBeenCalledWith(
+      "codex",
+      ["-c", "model_reasoning_effort=high", "app-server", flag, "app-server"],
+      expect.any(Object),
+    );
+  });
 });
 
 describe("resolveCodexAppServerSpawnEnv", () => {
@@ -77,6 +126,24 @@ describe("resolveCodexAppServerSpawnEnv", () => {
       KEEP: "parent",
       Other: "configured",
     });
+  });
+
+  it("strips inherited runtime loader injection before spawn", () => {
+    expect({
+      ...resolveCodexAppServerSpawnEnv(
+        {
+          env: {
+            NODE_PATH: "/configured/node_modules",
+            DYLD_INSERT_LIBRARIES: "/configured/inject.dylib",
+          },
+        },
+        {
+          NODE_PATH: "/ambient/node_modules",
+          LD_PRELOAD: "/ambient/inject.so",
+          KEEP: "safe",
+        },
+      ),
+    }).toEqual({ KEEP: "safe" });
   });
 
   it("uses a null-prototype env map and ignores prototype-polluting keys", () => {

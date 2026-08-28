@@ -13,13 +13,17 @@ import { dirname } from "node:path";
 import { Container, Text } from "@earendil-works/pi-tui";
 import { structuredPatch } from "diff";
 import { Type } from "typebox";
+import { isMissingPathError } from "../../../infra/errors.js";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.js";
 import { getLanguageFromPath, highlightCode } from "../../modes/interactive/theme/theme.js";
 import type { AgentTool } from "../../runtime/index.js";
 import { textResult } from "../../tools/common.js";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.js";
 import { generateDiffString, generateUnifiedPatch } from "./edit-diff.js";
-import { withFileMutationQueue } from "./file-mutation-queue.js";
+import {
+  resolveFileMutationQueueKey,
+  withFileMutationQueueKeyResolution,
+} from "./file-mutation-queue.js";
 import { type PersistedFileStat, verifyPersistedUtf8File } from "./file-write-verification.js";
 import { resolveToCwd } from "./path-utils.js";
 import {
@@ -71,6 +75,8 @@ const WriteToolOutputSchema = Type.Union([
  * Override these to delegate file writing to remote systems (for example SSH).
  */
 export interface WriteOperations {
+  /** Resolve the physical identity used to order this backend's file operations. */
+  resolveQueueKey?: (absolutePath: string, signal?: AbortSignal) => string | Promise<string>;
   /** Write content to a file */
   writeFile: (absolutePath: string, content: string) => Promise<void>;
   /** Create directory recursively */
@@ -94,12 +100,7 @@ const defaultWriteOperations: WriteOperations = {
         mtimeMs: stat.mtimeMs,
       } as const;
     } catch (error) {
-      if (
-        error &&
-        typeof error === "object" &&
-        "code" in error &&
-        (error as { code?: unknown }).code === "ENOENT"
-      ) {
+      if (isMissingPathError(error)) {
         return null;
       }
       throw error;
@@ -258,7 +259,7 @@ function trimTrailingEmptyLines(lines: string[]): string[] {
 function formatWriteCall(
   args: { path?: string; file_path?: string; content?: string } | undefined,
   options: ToolRenderResultOptions,
-  theme: typeof import("../../modes/interactive/theme/theme.js").theme,
+  theme: typeof import("../../modes/interactive/theme/theme.js").interactiveAgentTheme,
   cache: WriteHighlightCache | undefined,
 ): string {
   const rawPath = str(args?.file_path ?? args?.path);
@@ -299,7 +300,7 @@ function formatWriteResult(
     }>;
     isError?: boolean;
   },
-  theme: typeof import("../../modes/interactive/theme/theme.js").theme,
+  theme: typeof import("../../modes/interactive/theme/theme.js").interactiveAgentTheme,
 ): string | undefined {
   if (!result.isError) {
     return undefined;
@@ -315,12 +316,10 @@ function formatWriteResult(
 }
 
 function isMissingFileError(error: unknown): boolean {
-  if (!error || typeof error !== "object") {
-    return false;
-  }
-  if ("code" in error && (error as { code?: unknown }).code === "ENOENT") {
+  if (isMissingPathError(error)) {
     return true;
   }
+  // Injected write operations may preserve only their legacy human-readable error.
   return error instanceof Error && error.message.includes("No such file or directory");
 }
 
@@ -545,7 +544,8 @@ export function createWriteToolDefinition(
       void ctx;
       const absolutePath = resolveToCwd(path, cwd);
       const dir = dirname(absolutePath);
-      return withFileMutationQueue(absolutePath, async () => {
+      const queueKey = resolveFileMutationQueueKey(absolutePath, ops.resolveQueueKey, signal);
+      return withFileMutationQueueKeyResolution(queueKey, async () => {
         const precheck = await readOriginalWriteState(absolutePath, content, ops);
         if (signal?.aborted) {
           throw new Error("Operation aborted");

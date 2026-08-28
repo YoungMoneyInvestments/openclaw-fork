@@ -1,7 +1,8 @@
 /** Session lifecycle event broadcast to observers when a session is created or linked. */
-import { resolveGlobalSet } from "../shared/global-singleton.js";
+import { resolveGlobalSet, resolveGlobalSingleton } from "../shared/global-singleton.js";
 export type SessionLifecycleEvent = {
   sessionKey: string;
+  agentId?: string;
   reason: string;
   parentSessionKey?: string;
   label?: string;
@@ -36,6 +37,18 @@ const SESSION_IDENTITY_MUTATION_LISTENERS = resolveGlobalSet<SessionIdentityMuta
   Symbol.for("openclaw.sessionIdentityMutationListeners"),
   "close-and-restart",
 );
+const SESSION_IDENTITY_MUTATION_STATE = resolveGlobalSingleton(
+  Symbol.for("openclaw.sessionIdentityMutationState"),
+  () => ({ version: 0 }),
+);
+const SESSION_LIFECYCLE_STATE = resolveGlobalSingleton(
+  Symbol.for("openclaw.sessionLifecycleState"),
+  () => ({ version: 0 }),
+);
+
+export function readSessionLifecycleVersion(): number {
+  return SESSION_LIFECYCLE_STATE.version;
+}
 
 /** Registers a session lifecycle listener. */
 export function onSessionLifecycleEvent(listener: SessionLifecycleListener): () => void {
@@ -47,6 +60,7 @@ export function onSessionLifecycleEvent(listener: SessionLifecycleListener): () 
 
 /** Emits a best-effort session lifecycle event to all listeners. */
 export function emitSessionLifecycleEvent(event: SessionLifecycleEvent): void {
+  SESSION_LIFECYCLE_STATE.version += 1;
   for (const listener of SESSION_LIFECYCLE_LISTENERS) {
     try {
       listener(event);
@@ -63,7 +77,13 @@ export function onSessionIdentityMutation(listener: SessionIdentityMutationListe
   };
 }
 
+/** Monotonic fence for projections that consume session identities across owner boundaries. */
+export function readSessionIdentityMutationVersion(): number {
+  return SESSION_IDENTITY_MUTATION_STATE.version;
+}
+
 export function emitSessionIdentityMutation(mutation: SessionIdentityMutation): void {
+  SESSION_IDENTITY_MUTATION_STATE.version += 1;
   for (const listener of SESSION_IDENTITY_MUTATION_LISTENERS) {
     try {
       listener(mutation);

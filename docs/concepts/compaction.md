@@ -22,11 +22,23 @@ The full conversation history stays on disk. Compaction only changes what the mo
 New configs default `agents.defaults.compaction.mode` to `"safeguard"` (stricter guardrails, summary quality audits). Set `mode: "default"` explicitly to opt out.
 </Note>
 
+With the built-in safeguard quality guard enabled, OpenClaw applies the final
+summary budget before validation. Required headings must remain in the retained
+generated body, while pending asks and exact identifiers must remain in the
+exact text that would be stored. Invalid output gets only the configured number
+of corrective attempts. If no finalized summary passes, compaction stops before
+writing a transcript entry, keeps the original history, and surfaces the
+existing recovery outcome.
+
 ## Auto-compaction
 
 Auto-compaction is on by default. It runs when the session nears the context limit, or when the model returns a context-overflow error (in which case OpenClaw compacts and retries).
 
-Set `agents.defaults.compaction.enabled: false` to disable the embedded runtime's proactive threshold compaction. OpenClaw's preflight and overflow-recovery compaction paths remain available, as does manual `/compact`.
+Normal replies check session usage before the next turn. Successful direct commands using the built-in OpenClaw runtime, including `openclaw agent --local`, run the same usage-based maintenance after recording the completed turn and protecting any pending reply. The following command then uses the compacted context. This works in safeguard mode even when memory flush is disabled; native runtimes retain their own compaction ownership.
+
+If direct-command post-turn compaction fails, OpenClaw logs a warning and returns the completed reply while the run and session are still current. Cancellation, restart, or a replaced session still stops that result from being returned.
+
+Set `agents.defaults.compaction.enabled: false` to disable the embedded runtime's proactive threshold compaction and direct-command post-turn maintenance. OpenClaw's preflight and overflow-recovery compaction paths remain available, as does manual `/compact`.
 
 You will see:
 
@@ -185,6 +197,10 @@ To use a registered provider, set its id in your config:
 
 Setting a `provider` automatically forces `mode: "safeguard"`. Providers receive the same compaction instructions and identifier-preservation policy as the built-in path, and OpenClaw still preserves recent-turn and split-turn suffix context after provider output.
 
+The built-in quality audit and its corrective retries apply only to built-in
+summarization. Configured provider output keeps the provider's existing
+validation semantics.
+
 <Note>
 If the provider fails or returns an empty result, OpenClaw falls back to built-in LLM summarization.
 </Note>
@@ -214,4 +230,5 @@ For advanced configuration (reserve tokens, identifier preservation, custom cont
 - [Session](/concepts/session): session management and lifecycle.
 - [Session pruning](/concepts/session-pruning): trimming tool results.
 - [Context](/concepts/context): how context is built for agent turns.
-- [Hooks](/automation/hooks): compaction lifecycle hooks (`before_compaction`, `after_compaction`).
+- [Hooks](/automation/hooks#event-types): internal compaction events (`session:compact:before`, `session:compact:after`).
+- [Plugin hooks](/plugins/hooks#hook-catalog): typed compaction hooks (`before_compaction`, `after_compaction`).

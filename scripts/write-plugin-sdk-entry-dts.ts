@@ -3,11 +3,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { build } from "tsdown";
+import { discoverDeclarationSources } from "./lib/declaration-source-index.mts";
 import {
   buildPluginSdkEntrySources,
+  listPluginSdkDeclarationOutputs,
   pluginSdkEntrypoints,
   productionPluginSdkEntrypoints,
-} from "./lib/plugin-sdk-entries.mjs";
+} from "./lib/plugin-sdk-entries.mts";
 
 const USE_CANONICAL_DECLARATIONS = process.env.OPENCLAW_PLUGIN_SDK_CANONICAL_DTS === "1";
 
@@ -56,8 +58,8 @@ const flatDeclarationEntrypoints = shouldBuildPrivateQaEntries
 const flatDeclarationEntrypointSet = new Set(flatDeclarationEntrypoints);
 
 if (USE_CANONICAL_DECLARATIONS) {
-  for (const entry of flatDeclarationEntrypoints) {
-    const declarationPath = path.join(distPluginSdkDir, `${entry}.d.ts`);
+  for (const relativePath of listPluginSdkDeclarationOutputs(flatDeclarationEntrypoints)) {
+    const declarationPath = path.resolve(process.cwd(), relativePath);
     if (!fs.existsSync(declarationPath)) {
       throw new Error(
         `Missing canonical plugin SDK declaration: ${path.relative(process.cwd(), declarationPath)}`,
@@ -67,12 +69,16 @@ if (USE_CANONICAL_DECLARATIONS) {
 } else {
   const flatDeclarationTempDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-plugin-sdk-dts-"));
   try {
+    const entry = buildPluginSdkEntrySources(flatDeclarationEntrypoints);
+    const tsconfig = "tsconfig.plugin-sdk.dts.json";
+    const files = discoverDeclarationSources(tsconfig, Object.values(entry));
     await build({
       clean: true,
       config: false,
       deps: { neverBundle: (id) => isBareImportSpecifier(id) },
-      dts: true,
-      entry: buildPluginSdkEntrySources(flatDeclarationEntrypoints),
+      // Eager reuse checks source root membership, including transitive emit requests.
+      dts: { emitDtsOnly: true, eager: true, tsconfigRaw: { files, include: [] } },
+      entry,
       failOnWarn: false,
       fixedExtension: false,
       format: "esm",
@@ -81,9 +87,14 @@ if (USE_CANONICAL_DECLARATIONS) {
       outExtensions: () => ({ js: ".js", dts: ".d.ts" }),
       platform: "node",
       report: false,
-      tsconfig: "tsconfig.plugin-sdk.dts.json",
+      tsconfig,
     });
 
+    for (const name of flatDeclarationEntrypoints) {
+      if (!fs.existsSync(path.join(flatDeclarationTempDir, `${name}.d.ts`))) {
+        throw new Error(`Missing plugin SDK declaration: ${name}.d.ts`);
+      }
+    }
     removeExistingFlatDeclarations(distPluginSdkDir);
     copyFlatDeclarations(flatDeclarationTempDir, distPluginSdkDir);
   } finally {

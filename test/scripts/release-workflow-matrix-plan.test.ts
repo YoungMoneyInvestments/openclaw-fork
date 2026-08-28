@@ -22,6 +22,7 @@ type WorkflowStep = {
   if?: string;
   name?: string;
   run?: string;
+  with?: Record<string, unknown>;
 };
 
 type MatrixEntry = {
@@ -59,6 +60,8 @@ function requiredJob(definition: WorkflowDocument, name: string): WorkflowJob {
 // may provide the complete immutable package artifact tuple.
 const WORKFLOW_CALL_ONLY_INPUTS = new Set([
   "prepare_only",
+  "emit_candidate_evidence",
+  "release_soak",
   "package_artifact_name",
   "package_artifact_id",
   "package_artifact_digest",
@@ -68,6 +71,13 @@ const WORKFLOW_CALL_ONLY_INPUTS = new Set([
   "package_source_sha",
   "package_sha256",
   "package_version",
+  "enable_prepublish_plugin_registry",
+  "prepublish_plugin_registry_artifact_name",
+  "prepublish_plugin_registry_artifact_id",
+  "prepublish_plugin_registry_artifact_digest",
+  "prepublish_plugin_registry_artifact_run_id",
+  "prepublish_plugin_registry_artifact_run_attempt",
+  "prepublish_plugin_registry_manifest_sha256",
   "shared_image_artifact_name",
   "shared_image_artifact_id",
   "shared_image_artifact_digest",

@@ -9,6 +9,7 @@ import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -165,7 +166,7 @@ class ChatControllerCommandControlsTest {
     }
 
   @Test
-  fun startNewChatCreatesWriteScopedSessionAndReloadsHistory() =
+  fun startNewChatCreatesUnnamedWriteScopedSessionAndReloadsHistory() =
     runTest {
       val (controller, requests) =
         chatControllerTestSetup {
@@ -185,7 +186,7 @@ class ChatControllerCommandControlsTest {
       assertTrue(create.second.orEmpty().contains("\"parentSessionKey\":\"main\""))
       assertTrue(create.second.orEmpty().contains("\"emitCommandHooks\":true"))
       assertTrue(create.second.orEmpty().contains("\"succeedsParent\":false"))
-      assertTrue(create.second.orEmpty().contains("\"label\":\"New chat\""))
+      assertFalse(create.second.orEmpty().contains("\"label\""))
       assertEquals("agent:main:dashboard:fresh", controller.sessionKey.value)
       assertEquals("fresh-session", controller.sessionId.value)
       assertTrue(requests.any { it.first == "chat.history" })
@@ -228,7 +229,7 @@ class ChatControllerCommandControlsTest {
       assertEquals(false, creates[1].second.orEmpty().contains("\"parentSessionKey\""))
       assertEquals(false, creates[1].second.orEmpty().contains("\"emitCommandHooks\""))
       assertTrue(creates[1].second.orEmpty().contains("\"agentId\":\"main\""))
-      assertTrue(creates[1].second.orEmpty().contains("\"label\":\"New chat\""))
+      assertFalse(creates.any { it.second.orEmpty().contains("\"label\"") })
       assertEquals("agent:main:dashboard:fresh", controller.sessionKey.value)
     }
 
@@ -264,6 +265,7 @@ class ChatControllerCommandControlsTest {
       controller.patchSession(
         key = "main",
         ownerAgentId = "owner-a",
+        expectedSessionId = "session-main",
         clearLabel = true,
         clearCategory = true,
         pinned = true,
@@ -275,6 +277,7 @@ class ChatControllerCommandControlsTest {
       val patch = requests.first { it.first == "sessions.patch" }.second.orEmpty()
       assertTrue(patch.contains("\"key\":\"main\""))
       assertTrue(patch.contains("\"agentId\":\"owner-a\""))
+      assertTrue(patch.contains("\"expectedSessionId\":\"session-main\""))
       assertTrue(patch.contains("\"label\":null"))
       assertTrue(patch.contains("\"category\":null"))
       assertTrue(patch.contains("\"pinned\":true"))
@@ -285,6 +288,73 @@ class ChatControllerCommandControlsTest {
       assertTrue(delete.contains("\"key\":\"main\""))
       assertTrue(delete.contains("\"deleteTranscript\":true"))
       assertEquals(2, requests.count { it.first == "sessions.list" })
+    }
+
+  @Test
+  fun manualSessionRenamePersistsExplicitLabel() =
+    runTest {
+      val (controller, requests) =
+        chatControllerTestSetup {
+          respond("sessions.patch", "{}")
+          respond("sessions.list", """{"sessions":[]}""")
+        }
+
+      assertTrue(controller.patchSession(key = "main", ownerAgentId = "owner-a", label = "Renamed chat"))
+
+      val patch = requests.single { it.first == "sessions.patch" }.second.orEmpty()
+      assertTrue(patch.contains("\"key\":\"main\""))
+      assertTrue(patch.contains("\"agentId\":\"owner-a\""))
+      assertTrue(patch.contains("\"label\":\"Renamed chat\""))
+    }
+
+  @Test
+  fun archiveUsesObservedIdentityAndArchiveDeadline() =
+    runTest {
+      var archiveParams: String? = null
+      var archiveTimeoutMs: Long? = null
+      val controller =
+        ChatController(
+          scope = this,
+          json = json,
+          requestGateway = { method, _ ->
+            if (method == "sessions.list") """{"sessions":[]}""" else "{}"
+          },
+          requestGatewayWithTimeout = { method, paramsJson, timeoutMs ->
+            assertEquals("sessions.patch", method)
+            archiveParams = paramsJson
+            archiveTimeoutMs = timeoutMs
+            "{}"
+          },
+        )
+
+      assertTrue(
+        controller.patchSession(
+          key = "agent:main:side",
+          expectedSessionId = "session-side",
+          archived = true,
+        ),
+      )
+
+      assertTrue(archiveParams.orEmpty().contains("\"expectedSessionId\":\"session-side\""))
+      assertEquals(10 * 60_000L, archiveTimeoutMs)
+    }
+
+  @Test
+  fun archiveWithoutObservedIdentityDoesNotDispatch() =
+    runTest {
+      val requests = mutableListOf<String>()
+      val controller =
+        ChatController(
+          scope = this,
+          json = json,
+          requestGateway = { method, _ ->
+            requests += method
+            "{}"
+          },
+        )
+
+      assertFalse(controller.patchSession(key = "agent:main:cached", archived = true))
+      assertFalse(requests.contains("sessions.patch"))
     }
 
   @Test
@@ -360,6 +430,7 @@ class ChatControllerCommandControlsTest {
       val create = requests.first { it.first == "sessions.create" }.second.orEmpty()
       assertTrue(create.contains("\"parentSessionKey\":\"main\""))
       assertTrue(create.contains("\"fork\":true"))
+      assertFalse(create.contains("\"forkFrom\""))
       // The active unqualified parent keeps the captured default-agent owner.
       assertTrue(create.contains("\"agentId\":\"main\""))
 
@@ -374,6 +445,10 @@ class ChatControllerCommandControlsTest {
       val capturedOwnerCreate = requests.last { it.first == "sessions.create" }.second.orEmpty()
       assertTrue(capturedOwnerCreate.contains("\"parentSessionKey\":\"custom\""))
       assertTrue(capturedOwnerCreate.contains("\"agentId\":\"owner-a\""))
+
+      controller.forkSession("main", fromLastCompleted = true)
+      val activeCreate = requests.last { it.first == "sessions.create" }.second.orEmpty()
+      assertTrue(activeCreate.contains("\"forkFrom\":\"last-completed\""))
       assertTrue(requests.any { it.first == "sessions.list" })
       assertEquals(
         false,
@@ -390,7 +465,10 @@ class ChatControllerCommandControlsTest {
     runTest {
       val (controller, requests) =
         chatControllerTestSetup {
-          respond("sessions.list", """{"sessions":[{"key":"main","unread":true}]}""")
+          respond(
+            "sessions.list",
+            """{"sessions":[{"key":"main","sessionId":"session-main","unread":true}]}""",
+          )
         }
 
       controller.refreshSessions(archived = true)
@@ -401,6 +479,12 @@ class ChatControllerCommandControlsTest {
           .second
           .orEmpty()
           .contains("\"archived\":true"),
+      )
+      assertEquals(
+        "session-main",
+        controller.sessions.value
+          .single()
+          .sessionId,
       )
 
       controller.switchSession("main")
@@ -470,11 +554,28 @@ class ChatControllerCommandControlsTest {
     }
 
   @Test
+  fun explicitMarkReadUsesLegacyCompatiblePayloadOnCurrentGateway() =
+    runTest {
+      val (controller, requests) =
+        chatControllerTestSetup {
+          gatewayAdvertisesCapability = { it == SESSION_UNREAD_ACK_CAPABILITY }
+        }
+
+      assertTrue(controller.patchSession(key = "main", unread = false))
+      advanceUntilIdle()
+
+      val patch = requests.single { it.first == "sessions.patch" }.second.orEmpty()
+      assertTrue(patch.contains("\"unread\":false"))
+      assertFalse(patch.contains("readIntent"))
+      assertFalse(patch.contains("expectedMarkedUnreadAt"))
+    }
+
+  @Test
   fun archivingOrDeletingTheOpenSessionFallsBackToMain() =
     runTest {
       val (controller, requests) =
         chatControllerTestSetup {
-          respond("sessions.list", """{"sessions":[{"key":"agent:main:side"}]}""")
+          respond("sessions.list", """{"sessions":[{"key":"agent:main:side","sessionId":"session-side"}]}""")
           respond("sessions.delete", """{"deleted":true}""")
         }
 
@@ -482,7 +583,11 @@ class ChatControllerCommandControlsTest {
       advanceUntilIdle()
       assertEquals("agent:main:side", controller.sessionKey.value)
 
-      controller.patchSession(key = "agent:main:side", archived = true)
+      controller.patchSession(
+        key = "agent:main:side",
+        expectedSessionId = "session-side",
+        archived = true,
+      )
       advanceUntilIdle()
       assertEquals("main", controller.sessionKey.value)
 
@@ -514,6 +619,13 @@ class ChatControllerCommandControlsTest {
       )
       advanceUntilIdle()
       assertEquals(1, requests.count { it.first == "sessions.patch" })
+      assertFalse(
+        requests
+          .single { it.first == "sessions.patch" }
+          .second
+          .orEmpty()
+          .contains("expectedMarkedUnreadAt"),
+      )
 
       // Server-confirmed read resets the episode; a stale duplicate must not re-patch.
       controller.handleGatewayEvent(
@@ -527,6 +639,55 @@ class ChatControllerCommandControlsTest {
       )
       advanceUntilIdle()
       assertEquals(2, requests.count { it.first == "sessions.patch" })
+    }
+
+  @Test
+  fun manualUnreadOnOpenSessionSurvivesRunUpdatesUntilReactivation() =
+    runTest {
+      val (controller, requests) =
+        chatControllerTestSetup {
+          gatewayAdvertisesCapability = { it == SESSION_UNREAD_ACK_CAPABILITY }
+          respond(
+            "sessions.list",
+            """{"sessions":[{"key":"main","unread":false},{"key":"other","unread":false}]}""",
+          )
+        }
+
+      controller.refreshSessions()
+      advanceUntilIdle()
+      controller.switchSession("main")
+      advanceUntilIdle()
+
+      controller.handleGatewayEvent(
+        "sessions.changed",
+        """{"sessionKey":"main","session":{"key":"main","agentId":"main","unread":true,"markedUnreadAt":100}}""",
+      )
+      advanceUntilIdle()
+      assertEquals(0, requests.count { it.first == "sessions.patch" })
+      val retained = controller.sessions.value.first { it.key == "main" }
+      assertEquals(true, retained.unread)
+      assertEquals(100L, retained.markedUnreadAt)
+
+      controller.handleGatewayEvent(
+        "sessions.changed",
+        """{"sessionKey":"main","session":{"key":"main","agentId":"main","unread":true,"markedUnreadAt":100,"hasActiveRun":true,"status":"running"}}""",
+      )
+      controller.handleGatewayEvent(
+        "sessions.changed",
+        """{"sessionKey":"main","session":{"key":"main","agentId":"main","unread":true,"markedUnreadAt":100,"hasActiveRun":false,"status":"done"}}""",
+      )
+      advanceUntilIdle()
+      assertEquals(0, requests.count { it.first == "sessions.patch" })
+
+      controller.switchSession("other")
+      advanceUntilIdle()
+      controller.switchSession("main")
+      advanceUntilIdle()
+
+      val patch = requests.single { it.first == "sessions.patch" }.second.orEmpty()
+      assertTrue(patch.contains("\"unread\":false"))
+      assertTrue(patch.contains("\"expectedMarkedUnreadAt\":100"))
+      assertFalse(patch.contains("readIntent"))
     }
 
   @Test
@@ -548,36 +709,6 @@ class ChatControllerCommandControlsTest {
       assertEquals(false, create.second.orEmpty().contains("\"parentSessionKey\""))
       assertEquals(false, create.second.orEmpty().contains("\"emitCommandHooks\""))
       assertEquals("agent:main:dashboard:first", controller.sessionKey.value)
-    }
-
-  @Test
-  fun startNewChatUsesNextAvailableNewChatLabel() =
-    runTest {
-      val (controller, requests) =
-        chatControllerTestSetup {
-          respond("sessions.create", """{"ok":true,"key":"agent:main:dashboard:fresh-3"}""")
-          respond("chat.history", """{"sessionId":"fresh-session-3","messages":[]}""")
-          respond("health", "{}")
-          respond("sessions.list") { paramsJson ->
-            """
-            {
-              "sessions": [
-                {"key":"agent:main:dashboard:fresh","displayName":"New chat"},
-                {"key":"agent:main:dashboard:fresh-2","displayName":"New chat 2"}
-              ]
-            }
-            """.trimIndent()
-          }
-        }
-      controller.handleGatewayEvent("health", null)
-      controller.refreshSessions()
-      advanceUntilIdle()
-
-      assertTrue(controller.startNewChatAwait())
-
-      val create = requests.first { it.first == "sessions.create" }
-      assertTrue(create.second.orEmpty().contains("\"label\":\"New chat 3\""))
-      assertEquals("agent:main:dashboard:fresh-3", controller.sessionKey.value)
     }
 
   @Test

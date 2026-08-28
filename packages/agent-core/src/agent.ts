@@ -10,6 +10,7 @@ import type {
 } from "@openclaw/llm-core";
 import { runAgentLoop, runAgentLoopContinue } from "./agent-loop.js";
 import { TranscriptNotContinuableError } from "./errors.js";
+import { attachInternalSyncSteeringGetter, getInternalBeforeToolBatch } from "./internal-hooks.js";
 import { resolveAgentReasoningOption } from "./reasoning.js";
 import { type AgentCoreStreamRuntimeDeps, resolveAgentCoreStreamFn } from "./runtime-deps.js";
 import {
@@ -145,7 +146,7 @@ export interface AgentOptions {
     context: PrepareNextTurnContext,
     signal?: AbortSignal,
   ) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
-  /** Queue drain mode for steering messages injected before the next assistant response. */
+  /** Queue drain mode for steering messages applied before the next unstarted tool or model turn. */
   steeringMode?: QueueMode;
   /** Queue drain mode for follow-up messages injected after the agent would otherwise stop. */
   followUpMode?: QueueMode;
@@ -163,6 +164,9 @@ export interface AgentOptions {
 
 class PendingMessageQueue {
   private messages: AgentMessage[] = [];
+  // Drained messages stay owned here until message_end commits them.
+  // A failed run restores them ahead of messages accepted later.
+  private inFlight: AgentMessage[] = [];
   public mode: QueueMode;
 
   constructor(mode: QueueMode) {
@@ -178,23 +182,27 @@ class PendingMessageQueue {
   }
 
   drain(): AgentMessage[] {
-    if (this.mode === "all") {
-      const drained = this.messages.slice();
-      this.messages = [];
-      return drained;
-    }
+    const count = this.mode === "all" ? this.messages.length : 1;
+    const drained = this.messages.splice(0, count);
+    this.inFlight.push(...drained);
+    return drained;
+  }
 
-    // one-at-a-time preserves later queued messages for subsequent loop turns.
-    const first = this.messages[0];
-    if (!first) {
-      return [];
+  commit(message: AgentMessage): void {
+    const index = this.inFlight.indexOf(message);
+    if (index >= 0) {
+      this.inFlight.splice(index, 1);
     }
-    this.messages = this.messages.slice(1);
-    return [first];
+  }
+
+  restore(): void {
+    this.messages = [...this.inFlight, ...this.messages];
+    this.inFlight = [];
   }
 
   clear(): void {
     this.messages = [];
+    this.inFlight = [];
   }
 }
 
@@ -217,6 +225,7 @@ export class Agent {
   >();
   private readonly steeringQueue: PendingMessageQueue;
   private readonly followUpQueue: PendingMessageQueue;
+  private readonly toolLoopRecoveryState = { criticalToolLoopSeen: false };
 
   public convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
   public transformContext?: (
@@ -328,7 +337,10 @@ export class Agent {
     return this.followUpQueue.mode;
   }
 
-  /** Queue a message to be injected after the current assistant turn finishes. */
+  /**
+   * Queue a message for the active run. Running tools finish, while sequential
+   * tail calls or a parallel batch that has not launched yet are skipped.
+   */
   steer(message: AgentMessage): void {
     this.steeringQueue.enqueue(message);
   }
@@ -385,8 +397,8 @@ export class Agent {
     this.mutableState.streamingMessage = undefined;
     this.mutableState.pendingToolCalls = new Set<string>();
     this.mutableState.errorMessage = undefined;
-    this.clearFollowUpQueue();
-    this.clearSteeringQueue();
+    this.toolLoopRecoveryState.criticalToolLoopSeen = false;
+    this.clearAllQueues();
   }
 
   /** Start a new prompt from text, a single message, or a batch of messages. */
@@ -401,6 +413,7 @@ export class Agent {
         "Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion.",
       );
     }
+    this.toolLoopRecoveryState.criticalToolLoopSeen = false;
     const messages = this.normalizePromptInput(input, images);
     await this.runPromptMessages(messages);
   }
@@ -494,6 +507,17 @@ export class Agent {
 
   private createLoopConfig(options: { skipInitialSteeringPoll?: boolean } = {}): AgentLoopConfig {
     let skipInitialSteeringPoll = options.skipInitialSteeringPoll === true;
+    const drainSteeringMessages = () => {
+      if (skipInitialSteeringPoll) {
+        skipInitialSteeringPoll = false;
+        return [];
+      }
+      return this.steeringQueue.drain();
+    };
+    const getSteeringMessages = attachInternalSyncSteeringGetter(
+      async () => drainSteeringMessages(),
+      drainSteeringMessages,
+    );
     return {
       model: this.mutableState.model,
       thinkingLevel: this.mutableState.thinkingLevel,
@@ -509,6 +533,8 @@ export class Agent {
       maxRetryDelayMs: this.maxRetryDelayMs,
       toolExecution: this.toolExecution,
       beforeToolCall: this.beforeToolCall,
+      beforeToolBatch: getInternalBeforeToolBatch(this),
+      toolLoopRecoveryState: this.toolLoopRecoveryState,
       resolveDeferredTool: this.resolveDeferredTool,
       afterToolCall: this.afterToolCall,
       afterToolOutcome: this.afterToolOutcome,
@@ -524,13 +550,7 @@ export class Agent {
       convertToLlm: this.convertToLlm,
       transformContext: this.transformContext,
       getApiKey: this.getApiKey,
-      getSteeringMessages: async () => {
-        if (skipInitialSteeringPoll) {
-          skipInitialSteeringPoll = false;
-          return [];
-        }
-        return this.steeringQueue.drain();
-      },
+      getSteeringMessages,
       getFollowUpMessages: async () => this.followUpQueue.drain(),
     };
   }
@@ -573,6 +593,8 @@ export class Agent {
   }
 
   private finishRun(): void {
+    this.steeringQueue.restore();
+    this.followUpQueue.restore();
     this.mutableState.isStreaming = false;
     this.mutableState.streamingMessage = undefined;
     this.mutableState.pendingToolCalls = new Set<string>();
@@ -605,6 +627,8 @@ export class Agent {
       case "message_end":
         this.mutableState.streamingMessage = undefined;
         this.mutableState.messages.push(event.message);
+        this.steeringQueue.commit(event.message);
+        this.followUpQueue.commit(event.message);
         break;
 
       case "tool_execution_start": {

@@ -5,6 +5,7 @@
  */
 import { addTimerTimeoutGraceMs } from "@openclaw/normalization-core/number-coercion";
 import { GatewayClientRequestError } from "../gateway/client.js";
+import { sanitizeApprovalScope } from "../infra/approval-scope.js";
 import { isEmbeddedMode } from "../infra/embedded-mode.js";
 import { getEmbeddedPluginApprovalBroker } from "../infra/embedded-plugin-approval-broker.js";
 import { formatErrorMessage } from "../infra/errors.js";
@@ -32,6 +33,7 @@ import type {
   HookContext,
   HookOutcome,
 } from "./agent-tools.before-tool-call.types.js";
+import { withGatewayToolApprovalOwner } from "./tools/gateway-caller-context.js";
 import { callGatewayTool } from "./tools/gateway.js";
 
 type PluginApprovalRequest = NonNullable<PluginHookBeforeToolCallResult["requireApproval"]>;
@@ -200,6 +202,7 @@ async function requestPluginToolApproval(params: {
           pluginId: approval.pluginId,
           title: approval.title,
           description: approval.description,
+          ...(approval.scope ? { scope: sanitizeApprovalScope(approval.scope) } : {}),
           severity: approval.severity,
           allowedDecisions: approval.allowedDecisions,
           toolName: params.toolName,
@@ -276,32 +279,36 @@ async function requestPluginToolApproval(params: {
       status?: string;
       decision?: unknown;
       deliveryRoute?: string;
-    } = await callGatewayTool(
-      "plugin.approval.request",
-      // Buffer beyond the approval timeout so the gateway can clean up
-      // and respond before the client-side RPC timeout fires.
-      { timeoutMs: gatewayTimeoutMs },
-      {
-        pluginId: approval.pluginId,
-        title: approval.title,
-        description: approval.description,
-        severity: approval.severity,
-        allowedDecisions: approval.allowedDecisions,
-        toolName: params.toolName,
-        toolCallId: params.toolCallId,
-        agentId: params.ctx?.agentId,
-        sessionKey: params.ctx?.sessionKey,
-        ...(params.ctx?.approvalReviewerDeviceId
-          ? { approvalReviewerDeviceIds: [params.ctx.approvalReviewerDeviceId] }
-          : {}),
-        turnSourceChannel: params.ctx?.turnSourceChannel,
-        turnSourceTo: params.ctx?.turnSourceTo,
-        turnSourceAccountId: params.ctx?.turnSourceAccountId,
-        turnSourceThreadId: params.ctx?.turnSourceThreadId,
-        timeoutMs,
-        twoPhase: true,
-      },
-      { expectFinal: false },
+    } = await withGatewayToolApprovalOwner(
+      approval.pluginId,
+      async () =>
+        await callGatewayTool(
+          "plugin.approval.request",
+          // Buffer beyond the approval timeout so the gateway can clean up
+          // and respond before the client-side RPC timeout fires.
+          { timeoutMs: gatewayTimeoutMs },
+          {
+            title: approval.title,
+            description: approval.description,
+            ...(approval.scope ? { scope: approval.scope } : {}),
+            severity: approval.severity,
+            allowedDecisions: approval.allowedDecisions,
+            toolName: params.toolName,
+            toolCallId: params.toolCallId,
+            agentId: params.ctx?.agentId,
+            sessionKey: params.ctx?.sessionKey,
+            ...(params.ctx?.approvalReviewerDeviceId
+              ? { approvalReviewerDeviceIds: [params.ctx.approvalReviewerDeviceId] }
+              : {}),
+            turnSourceChannel: params.ctx?.turnSourceChannel,
+            turnSourceTo: params.ctx?.turnSourceTo,
+            turnSourceAccountId: params.ctx?.turnSourceAccountId,
+            turnSourceThreadId: params.ctx?.turnSourceThreadId,
+            timeoutMs,
+            twoPhase: true,
+          },
+          { expectFinal: false },
+        ),
     );
     gatewayApprovalPhase = "none";
     const id = requestResult?.id;
@@ -353,10 +360,11 @@ async function requestPluginToolApproval(params: {
         let onAbort: (() => void) | undefined;
         const abortPromise = new Promise<never>((_, reject) => {
           if (params.signal!.aborted) {
-            reject(toLintErrorObject(params.signal!.reason, "Non-Error rejection"));
+            reject(toApprovalErrorObject(params.signal!.reason, "Non-Error rejection"));
             return;
           }
-          onAbort = () => reject(toLintErrorObject(params.signal!.reason, "Non-Error rejection"));
+          onAbort = () =>
+            reject(toApprovalErrorObject(params.signal!.reason, "Non-Error rejection"));
           params.signal!.addEventListener("abort", onAbort, { once: true });
         });
         try {
@@ -570,7 +578,7 @@ export async function resolveSkillWorkshopApprovalForFinalParams(params: {
 // Success output schemas do not describe policy-layer terminal results. Track
 // identity so catalog boundaries can reject them without trusting spoofable status fields.
 
-function toLintErrorObject(value: unknown, fallbackMessage: string): Error {
+function toApprovalErrorObject(value: unknown, fallbackMessage: string): Error {
   if (value instanceof Error) {
     return value;
   }

@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createDeferred } from "../../test/helpers/promise.js";
 import type { RunEmbeddedAgentParams } from "../agents/embedded-agent-runner/run/params.js";
 import type { SessionEntry } from "../config/sessions/types.js";
 import {
@@ -21,8 +22,8 @@ import {
   consultRealtimeVoiceAgent,
   REALTIME_VOICE_AGENT_CONSULT_SENDER_AUTH_VERSION,
 } from "./agent-consult-runtime.js";
-import { REALTIME_VOICE_AGENT_CONSULT_TOOL } from "./agent-consult-tool.js";
 import {
+  REALTIME_VOICE_AGENT_CONSULT_TOOL,
   resolveRealtimeVoiceAgentConsultTools,
   resolveRealtimeVoiceAgentConsultToolsAllow,
 } from "./agent-consult-tool.js";
@@ -74,6 +75,7 @@ function createAgentRuntime(payloads: unknown[] = [{ text: "Speak this." }]) {
       createdVia?: SessionEntry["createdVia"];
       createdActor?: SessionEntry["createdActor"];
       createdAt?: number;
+      sandbox?: SessionEntry["sandbox"];
       archivedAt?: number;
       sessionFile?: string;
       spawnedBy?: string;
@@ -173,14 +175,6 @@ function expectPositiveTimestamp(value: unknown) {
 function expectNonEmptyString(value: unknown) {
   expect(typeof value).toBe("string");
   expect((value as string).trim()).not.toBe("");
-}
-
-function createDeferred() {
-  let resolve = () => {};
-  const promise = new Promise<void>((resolvePromise) => {
-    resolve = resolvePromise;
-  });
-  return { promise, resolve };
 }
 
 describe("realtime voice agent consult runtime", () => {
@@ -403,6 +397,47 @@ describe("realtime voice agent consult runtime", () => {
     );
   });
 
+  it.each(["main", "other"])(
+    "inherits an isolated consult's required parent from agent %s without current role config",
+    async (parentAgentId) => {
+      const { runtime, runEmbeddedAgent, sessionStore } = createAgentRuntime();
+      const spawnedBy = `agent:${parentAgentId}:main`;
+      const createdActor = { type: "human" as const, id: "profile-required" };
+      sessionStore[spawnedBy] = {
+        sessionId: "parent-session",
+        createdActor,
+        sandbox: "required",
+        updatedAt: 1,
+      };
+      const sessionKey = "agent:main:subagent:voice:required";
+
+      await consultRealtimeVoiceAgent({
+        cfg: {},
+        agentRuntime: runtime as never,
+        logger: { warn: vi.fn() },
+        agentId: "main",
+        sessionKey,
+        spawnedBy,
+        contextMode: "isolated",
+        messageProvider: "voice",
+        lane: "voice",
+        runIdPrefix: "voice-realtime-consult:required",
+        args: { question: "Check the workspace." },
+        transcript: [],
+        surface: "a live phone call",
+        userLabel: "Caller",
+      });
+
+      expect(sessionStore[sessionKey]).toMatchObject({
+        createdVia: "talk",
+        createdActor,
+        sandbox: "required",
+        spawnedBy,
+      });
+      expect(requireEmbeddedAgentCall(runEmbeddedAgent).sessionKey).toBe(sessionKey);
+    },
+  );
+
   it("rejects an archived consult session before mutating or starting work", async () => {
     const { runtime, runEmbeddedAgent, sessionStore } = createAgentRuntime();
     sessionStore["voice:archived"] = {
@@ -593,12 +628,14 @@ describe("realtime voice agent consult runtime", () => {
     );
   });
 
-  it("forks requester context when fork mode has a parent session", async () => {
+  it("forks requester context and inherits its required creator isolation", async () => {
     const { runtime, runEmbeddedAgent, sessionStore } = createAgentRuntime();
     sessionStore["agent:main:main"] = {
       sessionId: "parent-session",
       sessionFile: testTempPath("parent.jsonl"),
       totalTokens: 100,
+      createdActor: { type: "human", id: "profile-required" },
+      sandbox: "required",
       updatedAt: 1,
     };
     const resolveParentForkDecision = vi.fn(async () => ({
@@ -684,7 +721,8 @@ describe("realtime voice agent consult runtime", () => {
       spawnedBy: "agent:main:main",
       forkedFromParent: true,
       createdVia: "talk",
-      createdActor: { type: "agent", id: "agent:main:main" },
+      createdActor: { type: "human", id: "profile-required" },
+      sandbox: "required",
       createdAt: forkedEntry.createdAt,
       updatedAt: forkedEntry.updatedAt,
     });

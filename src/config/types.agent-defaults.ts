@@ -28,6 +28,8 @@ export type EmbeddedAgentExecutionContract = "default" | "strict-agentic";
 export type SubagentDelegationMode = "suggest" | "prefer";
 /** Image compression/detail preference used before sending image inputs to models. */
 export type AgentImageQualityPreference = "auto" | "efficient" | "balanced" | "high";
+/** Scope of an interactive model selection when no explicit scope is supplied. */
+export type ModelSelectionScope = "session" | "agent" | "global";
 /** Canonical thinking levels accepted by agent defaults and compaction overrides. */
 export type AgentThinkingLevel =
   | "off"
@@ -125,6 +127,8 @@ export type AgentDefaultsConfig = {
   params?: Record<string, unknown>;
   /** Primary model and fallbacks (provider/model). Accepts string or {primary,fallbacks}. */
   model?: AgentModelConfig;
+  /** Optional model-selection scope. Omitted preserves each surface's existing behavior. */
+  modelSelectionScope?: ModelSelectionScope;
   /** Optional lower-cost model for short internal tasks such as generated session titles. */
   utilityModel?: string;
   /**
@@ -205,8 +209,6 @@ export type AgentDefaultsConfig = {
   startupContext?: AgentStartupContextConfig;
   /** Focused context-budget overrides for high-volume injected/read surfaces. */
   contextLimits?: AgentContextLimitsConfig;
-  /** Optional context window cap (used for runtime estimates + status %). */
-  contextTokens?: number;
   /** Opt-in: prune old tool results from the LLM context to reduce token usage. */
   contextPruning?: AgentContextPruningConfig;
   /** Compaction tuning and pre-compaction memory flush behavior. */
@@ -295,11 +297,11 @@ export type AgentDefaultsConfig = {
     model?: string;
     /** Session key for heartbeat runs ("main" or explicit session key). */
     session?: string;
-    /** Delivery target ("last", "none", or a channel id). */
+    /** Delivery target. Default "owner" uses explicit ownerAllowFrom/allowFrom; "last" may follow groups. */
     target?: string;
     /** Direct/DM delivery policy. Default: "allow". */
     directPolicy?: "allow" | "block";
-    /** Optional delivery override (E.164 for WhatsApp, chat id for Telegram). Supports :topic:NNN suffix for Telegram topics. */
+    /** Explicit channel destination; ignored for target "owner" or an unset target. */
     to?: string;
     /** Optional account id for multi-account channels. */
     accountId?: string;
@@ -320,8 +322,16 @@ export type AgentDefaultsConfig = {
      */
     isolatedSession?: boolean;
   };
-  /** Owner for ambient OpenClaw system-agent/Custodian inference. */
+  /** Owner for ambient system-agent/Custodian inference and unscoped operator-read fallbacks. */
   systemAgent?: {
+    agentId?: string;
+  };
+  /** Upgrade-only owner for the inherited credential store until H2-2 relocates credentials. */
+  authInheritance?: {
+    agentId?: string;
+  };
+  /** Upgrade-only owner for retired main-agent rows and legacy fixed session stores. */
+  sessionStore?: {
     agentId?: string;
   };
   /** Max concurrent agent runs across all conversations. Default: min(16, max(8, available CPU parallelism)). */
@@ -378,8 +388,8 @@ export type AgentCompactionConfig = {
   enabled?: boolean;
   /** Compaction summarization mode. */
   mode?: AgentCompactionMode;
-  /** Override the session thinking level for embedded OpenClaw compaction summaries. */
-  thinkingLevel?: AgentThinkingLevel;
+  /** Thinking level for embedded OpenClaw compaction summaries. Default: low. */
+  thinkingLevel?: AgentThinkingLevel | "inherit";
   /** Embedded OpenClaw keepRecentTokens budget used for cut-point selection. */
   keepRecentTokens?: number;
   /** Preserve this many most-recent user/assistant turns verbatim in compaction summary context. */
