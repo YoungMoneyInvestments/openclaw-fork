@@ -1526,7 +1526,7 @@ export async function autoMigrateLegacyState(params: {
       ? await migrateLegacyMediaPersistence(agentMigrationOptions)
       : { changes: [], warnings: [] };
   const transcriptDirectives =
-    mediaPersistence.warnings.length === 0
+    params.doctorOnlyStateMigrations === true && mediaPersistence.warnings.length === 0
       ? migrateHistoricalTranscriptDirectives(agentMigrationOptions)
       : { changes: [], warnings: [] };
   if (transcriptDirectives.warnings.length > 0 || mediaPersistence.warnings.length > 0) {
