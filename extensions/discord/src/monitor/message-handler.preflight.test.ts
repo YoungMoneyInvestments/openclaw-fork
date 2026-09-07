@@ -1724,7 +1724,7 @@ describe("preflightDiscordMessage", () => {
     expect(result).toBeNull();
   });
 
-  it("treats @everyone as a mention when requireMention is true", async () => {
+  it("does not treat @everyone as a bot mention when requireMention is true", async () => {
     const channelId = "channel-everyone-mention";
     const guildId = "guild-everyone-mention";
     const message = createDiscordMessage({
@@ -1732,6 +1732,81 @@ describe("preflightDiscordMessage", () => {
       channelId,
       content: "@everyone standup time!",
       mentionedEveryone: true,
+      author: {
+        id: "user-1",
+        bot: false,
+        username: "Peter",
+      },
+    });
+
+    const result = await runGuildPreflight({
+      channelId,
+      guildId,
+      message,
+      discordConfig: {
+        botId: "openclaw-bot",
+      } as DiscordConfig,
+      guildEntries: {
+        [guildId]: {
+          channels: {
+            [channelId]: {
+              enabled: true,
+              requireMention: true,
+            },
+          },
+        },
+      },
+    });
+
+    expect(result).toBeNull();
+  });
+
+  it("does not treat @here as a bot mention when requireMention is true", async () => {
+    const channelId = "channel-here-mention";
+    const guildId = "guild-here-mention";
+    const message = createDiscordMessage({
+      id: "m-here-mention",
+      channelId,
+      content: "@here market open",
+      mentionedEveryone: true,
+      author: {
+        id: "user-1",
+        bot: false,
+        username: "Peter",
+      },
+    });
+
+    const result = await runGuildPreflight({
+      channelId,
+      guildId,
+      message,
+      discordConfig: {
+        botId: "openclaw-bot",
+      } as DiscordConfig,
+      guildEntries: {
+        [guildId]: {
+          channels: {
+            [channelId]: {
+              enabled: true,
+              requireMention: true,
+            },
+          },
+        },
+      },
+    });
+
+    expect(result).toBeNull();
+  });
+
+  it("still accepts an explicit bot mention mixed with @everyone", async () => {
+    const channelId = "channel-everyone-plus-bot";
+    const guildId = "guild-everyone-plus-bot";
+    const message = createDiscordMessage({
+      id: "m-everyone-plus-bot",
+      channelId,
+      content: "<@openclaw-bot> @everyone standup time!",
+      mentionedEveryone: true,
+      mentionedUsers: [{ id: "openclaw-bot" }],
       author: {
         id: "user-1",
         bot: false,

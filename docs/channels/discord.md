@@ -586,6 +586,8 @@ Example:
     - configured mention patterns (`agents.entries.*.groupChat.mentionPatterns`, fallback `messages.groupChat.mentionPatterns`)
     - implicit reply-to-bot behavior in supported cases
 
+    `@everyone` and `@here` are broadcasts, not a mention of this bot. With `requireMention: true`, those messages are ignored unless the bot is also explicitly mentioned or implicitly addressed (for example a reply to the bot).
+
     When writing outbound Discord messages, use canonical mention syntax: `<@USER_ID>` for users, `<#CHANNEL_ID>` for channels, and `<@&ROLE_ID>` for roles. Do not use the legacy `<@!USER_ID>` nickname mention form.
 
     `requireMention` is configured per guild/channel (`channels.discord.guilds...`).

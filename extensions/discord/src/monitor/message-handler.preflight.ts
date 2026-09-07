@@ -607,16 +607,13 @@ export async function preflightDiscordMessage(
 
   const mentionText = hasTypedText ? baseText : "";
   const { implicitMentionKinds, wasMentioned } = resolveDiscordMentionState({
-    authorIsBot: Boolean(author.bot),
     botId,
     hasAnyMention,
     isDirectMessage,
     isExplicitlyMentioned: explicitlyMentioned,
     mentionRegexes,
     mentionText,
-    mentionedEveryone: message.mentionedEveryone,
     referencedAuthorId: message.referencedMessage?.author?.id,
-    senderIsPluralKit: sender.isPluralKit,
     transcript: preflightTranscript,
   });
   logDiscordPreflightInboundSummary({

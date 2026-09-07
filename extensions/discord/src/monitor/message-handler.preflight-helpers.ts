@@ -70,16 +70,13 @@ export function resolveInjectedBoundThreadLookupRecord(params: {
 }
 
 export function resolveDiscordMentionState(params: {
-  authorIsBot: boolean;
   botId?: string;
   hasAnyMention: boolean;
   isDirectMessage: boolean;
   isExplicitlyMentioned: boolean;
   mentionRegexes: RegExp[];
   mentionText: string;
-  mentionedEveryone: boolean;
   referencedAuthorId?: string;
-  senderIsPluralKit: boolean;
   transcript?: string;
 }) {
   if (params.isDirectMessage) {
@@ -89,20 +86,18 @@ export function resolveDiscordMentionState(params: {
     };
   }
 
-  const everyoneMentioned =
-    params.mentionedEveryone && (!params.authorIsBot || params.senderIsPluralKit);
-  const wasMentioned =
-    everyoneMentioned ||
-    matchesMentionWithExplicit({
-      text: params.mentionText,
-      mentionRegexes: params.mentionRegexes,
-      explicit: {
-        hasAnyMention: params.hasAnyMention,
-        isExplicitlyMentioned: params.isExplicitlyMentioned,
-        canResolveExplicit: Boolean(params.botId),
-      },
-      transcript: params.transcript,
-    });
+  // @everyone/@here set Discord's mention_everyone flag. That is a broadcast,
+  // not an explicit mention of this bot, so it must not satisfy requireMention.
+  const wasMentioned = matchesMentionWithExplicit({
+    text: params.mentionText,
+    mentionRegexes: params.mentionRegexes,
+    explicit: {
+      hasAnyMention: params.hasAnyMention,
+      isExplicitlyMentioned: params.isExplicitlyMentioned,
+      canResolveExplicit: Boolean(params.botId),
+    },
+    transcript: params.transcript,
+  });
   const implicitMentionKinds = implicitMentionKindWhen(
     "reply_to_bot",
     Boolean(params.botId) &&
