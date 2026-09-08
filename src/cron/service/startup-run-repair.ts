@@ -5,7 +5,7 @@ import { parseAbsoluteTimeMs } from "../parse.js";
 import type { CronRunLogEntry } from "../run-log-types.js";
 import type { CronJob, CronRunStatus } from "../types.js";
 import { maybeAutoDisableCronJobAfterRunFailure } from "./auto-disable.js";
-import { finalizeCronFailureNotifications, resolveFailureAlert } from "./failure-alerts.js";
+import { finalizeCronFailureNotifications } from "./failure-alerts.js";
 import type { CronServiceState, DeferredCronNotifications } from "./state.js";
 import type { CronTriggerEvalOutcome } from "./timer-execution-timeout.js";
 import {
@@ -80,7 +80,14 @@ export function markInterruptedStartupRun(params: {
   job.state.startupCatchupAtMs = undefined;
   job.updatedAtMs = nowMs;
 
-  const alertConfig = resolveFailureAlert(params.state, job);
+  // A gateway restart interrupting an in-flight run is not a genuine
+  // execution failure — the run is retried by the startup catch-up path
+  // (or its next scheduled tick) anyway. Passing alertConfig: null keeps
+  // consecutiveErrors/history/auto-disable bookkeeping intact but skips the
+  // failure-alert dispatch (GAP-205: every gateway restart was paging
+  // Discord once per in-flight job with this synthetic, non-actionable
+  // error, indistinguishable from a real failure).
+  const alertConfig = null;
   const autoDisableNotificationOwnsFailure = maybeAutoDisableCronJobAfterRunFailure({
     state: params.state,
     job,
