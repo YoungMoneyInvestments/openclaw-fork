@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { loadDotEnv } from "./dotenv.js";
+import { loadDotEnv, parseTrustedDotEnvContent } from "./dotenv.js";
 
 async function writeEnvFile(filePath: string, contents: string) {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
@@ -48,6 +48,26 @@ async function withDotEnvFixture(run: (fixture: DotEnvFixture) => Promise<void>)
 }
 
 describe("loadDotEnv", () => {
+  it("preserves hashes in trusted state values while leaving CWD parsing unchanged", async () => {
+    await withIsolatedEnvAndCwd(async () => {
+      await withDotEnvFixture(async ({ cwdDir, stateDir }) => {
+        await writeEnvFile(
+          path.join(stateDir, ".env"),
+          "FOO=state#suffix#\nBAR=state#value # note\n",
+        );
+        await writeEnvFile(path.join(cwdDir, ".env"), "FOO=cwd#comment\n");
+        process.chdir(cwdDir);
+        delete process.env.FOO;
+        delete process.env.BAR;
+
+        loadDotEnv({ quiet: true });
+
+        expect(process.env.FOO).toBe("cwd");
+        expect(process.env.BAR).toBe("state#value");
+      });
+    });
+  });
+
   it("loads ~/.openclaw/.env as fallback without overriding CWD .env", async () => {
     await withIsolatedEnvAndCwd(async () => {
       await withDotEnvFixture(async ({ cwdDir, stateDir }) => {
@@ -94,6 +114,46 @@ describe("loadDotEnv", () => {
 
         expect(process.env.FOO).toBe("from-global");
       });
+    });
+  });
+});
+
+describe("parseTrustedDotEnvContent", () => {
+  it("preserves embedded and trailing hashes and strips separated comments", () => {
+    expect(
+      parseTrustedDotEnvContent("A=demo#suffix#\nB=demo#suffix # comment\nC=demo\t# note\n"),
+    ).toEqual({
+      A: "demo#suffix#",
+      B: "demo#suffix",
+      C: "demo",
+    });
+  });
+
+  it("keeps dotenv quoting, empty values, export syntax, and duplicate ordering", () => {
+    expect(
+      parseTrustedDotEnvContent(
+        "export A=first#\nA=\"last#\" # note\nB='literal # value'\nC=`backtick # value`\nD=\nE= # comment\nF: colon#value\n",
+      ),
+    ).toEqual({
+      A: "last#",
+      B: "literal # value",
+      C: "backtick # value",
+      D: "",
+      E: "",
+      F: "colon#value",
+    });
+  });
+
+  it("does not promote assignments inside multiline quotes into environment entries", () => {
+    expect(
+      parseTrustedDotEnvContent('A="first\nINJECTED=not-an-entry#\nlast"\nB=actual#\n'),
+    ).toEqual({ A: "first\nINJECTED=not-an-entry#\nlast", B: "actual#" });
+  });
+
+  it("preserves escaped newlines, CRLF, and quoted duplicate assignments", () => {
+    expect(parseTrustedDotEnvContent('A=first#\r\nA="last\\nline"\r\nB=tail#\r\n')).toEqual({
+      A: "last\nline",
+      B: "tail#",
     });
   });
 });

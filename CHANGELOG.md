@@ -4,6 +4,10 @@ Docs: https://docs.openclaw.ai
 
 ## Unreleased
 
+### Fixes
+
+- Config: preserve embedded and trailing hashes in unquoted state-directory `.env` values while retaining whitespace-separated comments, quoted multiline values, and shell/CWD precedence.
+
 ## 2026.3.12
 
 ### Changes
