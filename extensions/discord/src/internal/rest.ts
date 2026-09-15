@@ -38,6 +38,8 @@ type RequestSchedulerOptions = {
 };
 
 export type RequestClientOptions = {
+  /** Current strict outbound DM recipients; undefined retains unrestricted transport behavior. */
+  readDmRecipients?: () => readonly string[] | undefined;
   tokenHeader?: "Bot" | "Bearer";
   baseUrl?: string;
   /** Complete versioned REST base supplied by the Discord endpoint override. */
@@ -256,6 +258,65 @@ export class RequestClient {
     routeKey = createRouteKey(method, path),
     assertReadAuthority?: () => void,
   ): Promise<unknown> {
+    if (method !== "GET" && this.options.readDmRecipients?.() !== undefined) {
+      const policyPath = decodeURIComponent(
+        new URL(path.replace(/^\/+/, "/"), "https://discord.invalid").pathname,
+      ).replace(/\/+$/, "");
+      const allowed = () => this.options.readDmRecipients?.() ?? [];
+      const permits = (recipient: string) =>
+        allowed().includes(recipient) || allowed().includes("*");
+      if (policyPath === "/users/@me/channels") {
+        const body = params.data?.body;
+        const recipient =
+          body && typeof body === "object" && "recipient_id" in body
+            ? body.recipient_id
+            : undefined;
+        if (typeof recipient !== "string" || !permits(recipient)) {
+          throw new Error("Discord outbound DM recipient is not allowed");
+        }
+      } else {
+        const channelId = /^\/channels\/([^/]+)(?:\/|$)/.exec(policyPath)?.[1];
+        if (channelId) {
+          // Read directly rather than enqueue behind this worker: a full scheduler must not deadlock.
+          const channel = await this.executeRequest(
+            "GET",
+            `/channels/${channelId}`,
+            {},
+            undefined,
+            assertReadAuthority,
+          );
+          if (
+            !channel ||
+            typeof channel !== "object" ||
+            !("id" in channel) ||
+            channel.id !== channelId ||
+            !("type" in channel)
+          ) {
+            throw new Error("Discord outbound channel identity is unknown");
+          }
+          if (channel.type === 1) {
+            const recipients = "recipients" in channel ? channel.recipients : undefined;
+            const recipient =
+              Array.isArray(recipients) && recipients.length === 1 ? recipients[0] : undefined;
+            if (
+              !recipient ||
+              typeof recipient.id !== "string" ||
+              recipient.bot ||
+              !permits(recipient.id)
+            ) {
+              throw new Error("Discord outbound DM recipient is not allowed");
+            }
+          } else if (
+            channel.type === 3 ||
+            !("guild_id" in channel) ||
+            typeof channel.guild_id !== "string" ||
+            !channel.guild_id
+          ) {
+            throw new Error("Discord outbound group DM or unknown channel is not allowed");
+          }
+        }
+      }
+    }
     const url = `${this.options.apiBaseUrl}${appendQuery(path, params.query)}`;
     const headers = new Headers({
       "User-Agent": this.options.userAgent ?? defaultOptions.userAgent,

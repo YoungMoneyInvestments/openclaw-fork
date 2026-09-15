@@ -12,6 +12,7 @@ import {
 } from "./accounts.js";
 import { RequestClient } from "./internal/discord.js";
 import { getGateway } from "./monitor/gateway-registry.js";
+import { createDiscordOutboundDmPolicy } from "./outbound-dm-policy.js";
 import { resolveDiscordProxyFetchForAccount } from "./proxy-fetch.js";
 import { createDiscordRequestClient } from "./proxy-request-client.js";
 import { createDiscordRetryRunner } from "./retry.js";
@@ -84,10 +85,14 @@ function resolveRest(
   timeoutMs?: number,
 ) {
   if (rest) {
+    if (rest instanceof RequestClient) {
+      rest.options.readDmRecipients = createDiscordOutboundDmPolicy(cfg, account.accountId);
+    }
     return rest;
   }
   const resolvedProxyFetch = proxyFetch ?? resolveDiscordProxyFetchForAccount(account, cfg);
   return createDiscordRequestClient(token, {
+    readDmRecipients: createDiscordOutboundDmPolicy(cfg, account.accountId),
     ...(resolvedProxyFetch ? { fetch: resolvedProxyFetch } : {}),
     ...(signal ? { signal } : {}),
     ...(timeoutMs !== undefined ? { timeout: timeoutMs } : {}),

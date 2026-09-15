@@ -39,6 +39,56 @@ async function expectDiscordErrorStatus(promise: Promise<unknown>, status: numbe
 }
 
 describe("RequestClient", () => {
+  it("enforces configured recipients at the raw REST write boundary", async () => {
+    let recipients = ["owner"];
+    const writes: string[] = [];
+    const channels: Record<string, object> = {
+      ownerDm: { id: "ownerDm", type: 1, recipients: [{ id: "owner" }] },
+      strangerDm: { id: "strangerDm", type: 1, recipients: [{ id: "stranger" }] },
+      groupDm: { id: "groupDm", type: 3, recipients: [{ id: "owner" }] },
+      guild: { id: "guild", type: 0, guild_id: "server" },
+    };
+    const client = new RequestClient("test-token", {
+      readDmRecipients: () => recipients,
+      scheduler: { maxConcurrency: 1 },
+      fetch: async (input, init) => {
+        const path = new URL(String(input)).pathname.replace("/api/v10", "");
+        if (init?.method === "GET") return createJsonResponse(channels[path.split("/")[2]] ?? {});
+        writes.push(path);
+        return createJsonResponse({ id: "sent" });
+      },
+    });
+    await expect(
+      client.post("/users/@me/channels", { body: { recipient_id: "stranger" } }),
+    ).rejects.toThrow("not allowed");
+    for (const path of [
+      "/users/@me/channels?x=1",
+      "/users/@me/channels/",
+      "/%75sers/@me/channels",
+    ]) {
+      await expect(client.post(path, { body: { recipient_id: "stranger" } })).rejects.toThrow(
+        "not allowed",
+      );
+    }
+    for (const channel of ["strangerDm", "groupDm", "unknown"]) {
+      await expect(
+        client.post(`/channels/${channel}/messages`, { body: { content: "test" } }),
+      ).rejects.toThrow();
+    }
+    await client.post("/channels/ownerDm/messages", { body: { content: "test" } });
+    await client.post("/channels/guild/messages", { body: { content: "test" } });
+    recipients = [];
+    for (const path of [
+      "/channels/ownerDm/typing",
+      "/channels/ownerDm/messages/message",
+      "/channels/ownerDm/messages/message/reactions/check/@me",
+    ]) {
+      await expect(client.patch(path, { body: { content: "test" } })).rejects.toThrow(
+        "not allowed",
+      );
+    }
+    expect(writes).toEqual(["/channels/ownerDm/messages", "/channels/guild/messages"]);
+  });
   afterEach(() => {
     vi.useRealTimers();
   });

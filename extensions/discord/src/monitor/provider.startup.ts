@@ -15,6 +15,7 @@ import {
 } from "../internal/discord.js";
 import type { GatewayPlugin } from "../internal/gateway.js";
 import { VoicePlugin } from "../internal/voice.js";
+import { createDiscordOutboundDmPolicy } from "../outbound-dm-policy.js";
 import { parseApplicationIdFromToken } from "../probe.js";
 import { DISCORD_REST_TIMEOUT_MS } from "../proxy-request-client.js";
 import type { DiscordGuildEntryResolved } from "./allow-list.js";
@@ -91,6 +92,7 @@ function createDiscordStatusReadyListener(params: {
 }
 
 export async function createDiscordMonitorClient(params: {
+  cfg?: OpenClawConfig;
   accountId: string;
   applicationId: string;
   token: string;
@@ -141,6 +143,9 @@ export async function createDiscordMonitorClient(params: {
       autoDeploy: false,
       commandDeployHashStore: params.commandDeployHashStore,
       requestOptions: {
+        readDmRecipients: params.cfg
+          ? createDiscordOutboundDmPolicy(params.cfg, params.accountId)
+          : undefined,
         timeout: DISCORD_REST_TIMEOUT_MS,
         runtimeProfile: "persistent",
         maxQueueSize: 1000,
