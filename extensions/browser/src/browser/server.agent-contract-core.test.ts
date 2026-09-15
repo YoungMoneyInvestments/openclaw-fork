@@ -119,6 +119,24 @@ describe("browser control server", () => {
   );
 
   it(
+    "names the accepted body shape when only a nested request carries a kind",
+    async () => {
+      const base = await startServerAndBase();
+      const response = await postActAndReadError(base, {
+        request: { kind: "batch", actions: [{ kind: "resize", width: 640, height: 480 }] },
+      });
+
+      expect(response.status).toBe(400);
+      expect(response.body.code).toBe(ACT_ERROR_CODES.kindRequired);
+      // The HTTP body is never unwrapped, so the guidance must name the body shape
+      // rather than the agent tool's nested `request` form.
+      expect(response.body.error).toContain('top-level "kind"');
+      expect(response.body.error).not.toContain("request:");
+    },
+    slowTimeoutMs,
+  );
+
+  it(
     "returns ACT_INVALID_REQUEST for malformed action payloads",
     async () => {
       const base = await startServerAndBase();

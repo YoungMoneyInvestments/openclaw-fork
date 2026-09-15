@@ -155,7 +155,10 @@ policy failures:
 
 Current `code` values:
 
-- `ACT_KIND_REQUIRED` (HTTP 400): `kind` is missing or unrecognized.
+- `ACT_KIND_REQUIRED` (HTTP 400): the body's top-level `kind` is missing or
+  unrecognized. The message names the body shape this route accepts. The agent
+  tool additionally accepts a nested `request` object or flattened act fields,
+  but this HTTP route never unwraps them.
 - `ACT_INVALID_REQUEST` (HTTP 400): action payload failed normalization or validation.
 - `ACT_SELECTOR_UNSUPPORTED` (HTTP 400): `selector` was used with an unsupported action kind.
 - `ACT_EVALUATE_DISABLED` (HTTP 403): `evaluate` (or `wait --fn`) is disabled by config.

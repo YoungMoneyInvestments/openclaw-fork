@@ -3733,6 +3733,55 @@ describe("browser tool act compatibility", () => {
     });
   });
 
+  it("merges flattened act fields into an empty nested request", async () => {
+    browserActionsMocks.browserAct.mockResolvedValueOnce({ ok: true });
+    const tool = createBrowserTool();
+    await tool.execute?.("call-1", {
+      action: "act",
+      kind: "batch",
+      actions: [{ kind: "click", ref: "1" }],
+      stopOnError: false,
+      targetId: "tab-1",
+      request: {},
+    });
+
+    const request = lastMockCallArg<{
+      kind?: string;
+      actions?: unknown[];
+      stopOnError?: boolean;
+      targetId?: string;
+    }>(browserActionsMocks.browserAct, 1);
+    expect(request).toEqual({
+      kind: "batch",
+      actions: [{ kind: "click", ref: "1" }],
+      stopOnError: false,
+      targetId: "tab-1",
+    });
+  });
+
+  it.each([
+    {
+      name: "neither request nor kind is supplied",
+      args: { action: "act", actions: [{ kind: "click", ref: "1" }] },
+    },
+    {
+      name: "a partial request arrives without a kind on any route",
+      args: { action: "act", request: { actions: [{ kind: "click", ref: "1" }] } },
+    },
+  ])("names the accepted act shapes when $name", async ({ args }) => {
+    const tool = createBrowserTool();
+    const error = await tool.execute?.("call-1", args).then(
+      () => undefined,
+      (err: unknown) => err,
+    );
+    const message = String(error);
+
+    expect(message).toContain("browser act requires a kind");
+    expect(message).toContain('request: { kind: "click"');
+    expect(message).toContain("flattened form");
+    expect(browserActionsMocks.browserAct).not.toHaveBeenCalled();
+  });
+
   it("keeps nested act request fields authoritative when flattened fields differ", async () => {
     const tool = createBrowserTool();
     await tool.execute?.("call-1", {

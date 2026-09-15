@@ -19,6 +19,7 @@ import {
   type ChromeMcpOperationOptions,
 } from "../chrome-mcp.js";
 import type { BrowserActRequest } from "../client-actions.types.js";
+import { BROWSER_ACT_KIND_REQUIRED_MESSAGE } from "../errors.js";
 import { normalizeBrowserEvaluateFunctionSource } from "../evaluate-source.js";
 import { getBrowserProfileCapabilities } from "../profile-capabilities.js";
 import type { BrowserRouteContext } from "../server-context.js";
@@ -85,7 +86,12 @@ export function registerBrowserAgentActRoutes(
     const body = readBody(req);
     const kindRaw = toStringOrEmpty(body.kind);
     if (!isActKind(kindRaw)) {
-      return jsonActError(res, 400, ACT_ERROR_CODES.kindRequired, "kind is required");
+      return jsonActError(
+        res,
+        400,
+        ACT_ERROR_CODES.kindRequired,
+        BROWSER_ACT_KIND_REQUIRED_MESSAGE,
+      );
     }
     const kind: ActKind = kindRaw;
     let action: BrowserActRequest;

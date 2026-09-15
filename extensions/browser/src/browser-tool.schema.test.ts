@@ -1,6 +1,7 @@
 // Browser tests cover browser tool.schema plugin behavior.
 import { expectDefined } from "@openclaw/normalization-core";
 import { projectRuntimeToolInputSchema } from "openclaw/plugin-sdk/agent-harness-runtime";
+import { validateToolArguments } from "openclaw/plugin-sdk/llm";
 import { normalizeOpenAIToolSchemas } from "openclaw/plugin-sdk/provider-tools";
 import { Value } from "typebox/value";
 import { describe, expect, it } from "vitest";
@@ -212,6 +213,68 @@ describe("browser tool schema", () => {
     expect(properties.profile?.description).toContain("default");
     expect(properties.labels?.description).toContain("snapshot");
     expect(properties.request?.description).toContain("act");
+  });
+
+  it("publishes the nested act request as partial so flattened repair stays reachable", () => {
+    const schema = createBrowserToolSchema(resolveBrowserToolCapabilities());
+    const properties = schema.properties as BrowserSchemaRecord;
+    const request = requireSchemaProperty(properties, "request", "browser request schema") as {
+      properties?: BrowserSchemaRecord;
+      required?: string[];
+    };
+    const topLevelRequired = (schema as unknown as { required?: string[] }).required ?? [];
+
+    // A partial `request` must survive tool-argument validation, because
+    // readActRequestParam() repairs it from flattened top-level act fields.
+    expect(request.required ?? []).not.toContain("kind");
+    expect(topLevelRequired).not.toContain("kind");
+    expect(topLevelRequired).toContain("action");
+    expect(
+      requireSchemaProperty(request.properties ?? {}, "kind", "browser request kind schema").enum,
+    ).toContain("batch");
+  });
+
+  it("accepts both act payload shapes plus the partial request the runtime repairs", () => {
+    const schema = createBrowserToolSchema(resolveBrowserToolCapabilities());
+    const actions = [{ kind: "resize", width: 1024, height: 768 }];
+
+    for (const args of [
+      { action: "act", kind: "batch", actions },
+      { action: "act", request: { kind: "batch", actions } },
+      { action: "act", kind: "batch", actions, request: {} },
+      { action: "act", kind: "click", ref: "e2", request: {} },
+      { action: "act", request: { actions } },
+    ]) {
+      expect(Value.Check(schema, args), JSON.stringify(args)).toBe(true);
+    }
+
+    expect(Value.Check(schema, { action: "act", request: { kind: "nope" } })).toBe(false);
+    expect(Value.Check(schema, { action: "act", kind: "nope", actions })).toBe(false);
+  });
+
+  it.each([
+    { action: "act", kind: "batch", actions: [{ kind: "resize", width: 1024, height: 768 }] },
+    {
+      action: "act",
+      request: { kind: "batch", actions: [{ kind: "resize", width: 1024, height: 768 }] },
+    },
+    {
+      action: "act",
+      kind: "batch",
+      actions: [{ kind: "resize", width: 640, height: 480 }],
+      request: {},
+    },
+  ])("passes tool-argument validation for %j", (args) => {
+    const validated = validateToolArguments(
+      {
+        name: "browser",
+        description: "Browser",
+        parameters: createBrowserToolSchema(resolveBrowserToolCapabilities()),
+      },
+      { type: "toolCall", id: "call-1", name: "browser", arguments: args },
+    );
+
+    expect(validated).toMatchObject({ action: "act" });
   });
 
   it("preserves batch fields without advertising them on unsupported profiles", () => {

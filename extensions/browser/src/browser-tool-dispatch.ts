@@ -43,7 +43,17 @@ import {
   BROWSER_ACTION_TRANSPORT_SLACK_MS,
   resolveBrowserNavigationTimeoutMs,
 } from "./browser/act-policy.js";
+import type { BrowserActRequest, BrowserActRequestDraft } from "./browser/client-actions.types.js";
 import { parseBrowserNavigationUrl } from "./browser/navigation-guard.js";
+
+/**
+ * No-kind guidance for the agent tool. Unlike the `/act` HTTP body, the tool also
+ * accepts a nested `request` and flattened act fields, and it repairs a partial
+ * `request`, so the retry it names must be valid on the tool surface. The example
+ * uses `click`, which every profile capability set offers.
+ */
+const BROWSER_ACT_TOOL_KIND_GUIDANCE =
+  'browser act requires a kind: send request: { kind: "click", ref: "e2" }, or the flattened form (kind: "click", ref: "e2").';
 
 function readOptionalTargetAndTimeout(params: Record<string, unknown>) {
   const targetId = normalizeOptionalString(params.targetId);
@@ -64,7 +74,7 @@ function readTargetUrlParam(params: Record<string, unknown>) {
 /** Run tab actions against the prepared host, node, or sandbox route. */
 export async function executeBrowserTabAction(context: {
   action: string;
-  actRequest?: Parameters<typeof browserAct>[1];
+  actRequest?: BrowserActRequestDraft;
   params: Record<string, unknown>;
   baseUrl?: string;
   profile?: string;
@@ -378,16 +388,19 @@ export async function executeBrowserTabAction(context: {
     }
     case "act": {
       const request = context.actRequest;
-      if (!request) {
-        throw new Error("request required");
+      const requestKind = request?.kind;
+      if (!request || typeof requestKind !== "string" || requestKind.length === 0) {
+        throw new Error(BROWSER_ACT_TOOL_KIND_GUIDANCE);
       }
-      if (!capabilities.actKinds.some((kind) => kind === request.kind)) {
+      if (!capabilities.actKinds.some((kind) => kind === requestKind)) {
         throw new Error(
-          `browser act kind ${JSON.stringify(request.kind)} is unavailable for this run`,
+          `browser act kind ${JSON.stringify(requestKind)} is unavailable for this run`,
         );
       }
       return await executeActAction({
-        request,
+        // Kind confirmed above; the remaining fields are the action payload the
+        // browser route normalizes and validates.
+        request: request as BrowserActRequest,
         baseUrl,
         profile,
         usesChromeMcp: isUserBrowserProfile,

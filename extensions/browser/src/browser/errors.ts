@@ -36,6 +36,15 @@ function isBrowserActErrorCode(value: unknown): value is BrowserActErrorCode {
   return typeof value === "string" && BROWSER_ACT_ERROR_CODE_VALUES.has(value);
 }
 
+/**
+ * Guidance for a browser-control `/act` request body that carries no top-level
+ * kind. The HTTP surface never unwraps a nested `request` object, so this names
+ * only the body shape it accepts; the agent tool's own guidance lives with the
+ * tool dispatch, which also accepts a nested `request` or flattened fields.
+ */
+export const BROWSER_ACT_KIND_REQUIRED_MESSAGE =
+  'browser act requires a top-level "kind" in the request body, for example {"kind":"click","ref":"e2"}.';
+
 const NO_DISPLAY_HEADLESS_SOURCES = ["request", "env", "profile", "config", "default"] as const;
 
 export type BrowserNoDisplayErrorDetails = {

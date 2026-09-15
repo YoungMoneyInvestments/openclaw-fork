@@ -26,7 +26,6 @@ import {
 } from "./browser-tool.routing.js";
 import {
   type AnyAgentTool,
-  type browserAct,
   BrowserToolOutputSchema,
   createBrowserToolSchema,
   resolveBrowserToolCapabilities,
@@ -45,6 +44,7 @@ import {
   callGatewayTool,
 } from "./browser-tool.runtime.js";
 import type { BrowserScreenshotOptions } from "./browser-tool.screenshot.js";
+import type { BrowserActRequestDraft } from "./browser/client-actions.types.js";
 import { withBrowserRequestScope } from "./browser/request-scope.js";
 
 type BrowserTabIdentity = { targetId: string; profile: string } & (
@@ -155,7 +155,7 @@ const LEGACY_BROWSER_ACT_SHARED_REQUEST_KEYS = new Set<
   (typeof LEGACY_BROWSER_ACT_REQUEST_KEYS)[number]
 >(["targetId"]);
 
-function readActRequestParam(params: Record<string, unknown>) {
+function readActRequestParam(params: Record<string, unknown>): BrowserActRequestDraft | undefined {
   const requestParam = params.request;
   if (requestParam && typeof requestParam === "object") {
     const request = { ...(requestParam as Record<string, unknown>) };
@@ -175,7 +175,7 @@ function readActRequestParam(params: Record<string, unknown>) {
       }
       request[key] = params[key];
     }
-    return request as Parameters<typeof browserAct>[1];
+    return request as BrowserActRequestDraft;
   }
 
   const kind = readStringParam(params, "kind");
@@ -190,7 +190,7 @@ function readActRequestParam(params: Record<string, unknown>) {
     }
     request[key] = params[key];
   }
-  return request as Parameters<typeof browserAct>[1];
+  return request as BrowserActRequestDraft;
 }
 
 function readToolTimeoutMs(params: Record<string, unknown>) {

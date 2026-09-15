@@ -104,3 +104,18 @@ export type BrowserActRequest =
       targetId?: string;
       stopOnError?: boolean;
     };
+
+/** Distributes `Request` over the act union while making its discriminator optional. */
+type WithOptionalActKind<Request> = Request extends BrowserActRequest
+  ? Omit<Request, "kind"> & { kind?: BrowserActRequest["kind"] }
+  : never;
+
+/**
+ * Act request as the agent tool assembles it before dispatch normalization.
+ *
+ * A nested `request` may arrive partial because flattened top-level act fields
+ * repair it (`readActRequestParam`), so the kind can still be missing when no
+ * route supplied one. Dispatch narrows this to `BrowserActRequest` once it has
+ * confirmed a kind, which keeps the normalized route/HTTP contract unchanged.
+ */
+export type BrowserActRequestDraft = WithOptionalActKind<BrowserActRequest>;

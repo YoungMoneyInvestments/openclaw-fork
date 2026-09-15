@@ -180,9 +180,12 @@ export function createBrowserToolSchema(capabilities: BrowserToolCapabilities) {
   const actKindDescription = capabilities.actKinds.includes("batch")
     ? "batch uses actions."
     : "Act kind.";
+  // A nested `request` may arrive partial: readActRequestParam() merges flattened
+  // top-level act fields into it, so `kind` stays optional here. Dispatch owns the
+  // authoritative error when no route supplied a kind.
   const BrowserActSchema = Type.Object(
     {
-      kind: stringEnum(capabilities.actKinds, { description: actKindDescription }),
+      kind: Type.Optional(stringEnum(capabilities.actKinds, { description: actKindDescription })),
       ...actProperties,
     },
     { description: "act" },
@@ -244,7 +247,8 @@ export function createBrowserToolSchema(capabilities: BrowserToolCapabilities) {
     dialogId: Type.Optional(Type.String()),
     accept: Type.Optional(Type.Boolean()),
     promptText: Type.Optional(Type.String()),
-    // Legacy flattened act params (preferred: request={...})
+    // Flattened act params. Either this form or a nested `request` must carry
+    // the kind; flattened fields also repair a partial `request`.
     kind: Type.Optional(stringEnum(capabilities.actKinds, { description: actKindDescription })),
     ...actProperties,
     request: Type.Optional(BrowserActSchema),
