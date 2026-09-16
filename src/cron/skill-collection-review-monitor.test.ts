@@ -73,6 +73,46 @@ describe("resolveSkillCollectionReviewMonitorSpecs", () => {
     ).toEqual(["ops", "research"]);
   });
 
+  it("skips agents whose explicit allowlist cannot run the maintenance tools", () => {
+    const cfg = {
+      agents: {
+        ownership: "explicit",
+        entries: {
+          main: {},
+          crew: {
+            tools: {
+              allow: ["crew_record_observation", "crew_ask_question", "crew_get_market_quote"],
+            },
+          },
+          reader: { tools: { allow: ["ls", "read"] } },
+        },
+      },
+      skills: { workshop: { autonomous: { mode: "auto" } } },
+    } as unknown as OpenClawConfig;
+
+    const specs = resolveSkillCollectionReviewMonitorSpecs(cfg);
+    expect(specs.map(({ agentId }) => agentId)).toEqual(["main", "reader"]);
+  });
+
+  it("skips an agent whose deny list removes every maintenance tool", () => {
+    const cfg = {
+      agents: {
+        ownership: "explicit",
+        entries: {
+          guarded: {
+            tools: {
+              allow: ["ls", "read", "write", "edit", "apply_patch", "exec", "process"],
+              deny: ["ls", "read", "write", "edit", "apply_patch", "exec", "process"],
+            },
+          },
+        },
+      },
+      skills: { workshop: { autonomous: { mode: "auto" } } },
+    } as unknown as OpenClawConfig;
+
+    expect(resolveSkillCollectionReviewMonitorSpecs(cfg)).toEqual([]);
+  });
+
   it("retains monitor rows while autonomous review is disabled", () => {
     const cfg = {
       agents: { list: [{ id: "main", workspace: "/tmp/openclaw-disabled" }] },
