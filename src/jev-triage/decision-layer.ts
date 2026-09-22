@@ -32,7 +32,7 @@ import {
   noul as sdkNoul,
   score as sdkScore,
 } from "@typesafe-ai/sdk";
-import type { Question } from "@typesafe-ai/sdk";
+import type { Fetch as SdkFetch, Question } from "@typesafe-ai/sdk";
 
 export const JEV_DECISION_LOG_VERSION = "jev_decision_log.v1";
 
@@ -268,7 +268,17 @@ type RawSystemOneResponse = {
 
 /** True when a TYPESAFE_API_KEY is present (never returns or logs the value). */
 export function hasJevApiKey(env: NodeJS.ProcessEnv = process.env): boolean {
-  return (env.TYPESAFE_API_KEY ?? "").trim().length > 0;
+  return readJevApiKey(env) !== undefined;
+}
+
+/**
+ * Read the API key out of an environment, or `undefined` when absent/blank.
+ * Only {@link createJevClient} consumes the return value; it is never logged,
+ * recorded, or returned to callers.
+ */
+export function readJevApiKey(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const key = (env.TYPESAFE_API_KEY ?? "").trim();
+  return key.length > 0 ? key : undefined;
 }
 
 function requireApiKey(env: NodeJS.ProcessEnv): void {
@@ -279,9 +289,29 @@ function requireApiKey(env: NodeJS.ProcessEnv): void {
   }
 }
 
-/** Default client factory; only reached after {@link requireApiKey} passes. */
-export function createJevClient(): JevClient {
-  return new TypeSafeClient() as unknown as JevClient;
+/** Transport override for tests and callers that bring their own fetch. */
+export type JevFetch = SdkFetch;
+
+/**
+ * Default client factory. The SDK constructor reads the ambient environment
+ * when `apiKey` is omitted, which would ignore a caller-supplied environment
+ * (or silently authenticate as whatever key the process happens to hold), so
+ * the key is read from `env` and passed explicitly. Refuses without a key.
+ */
+export function createJevClient(
+  env: NodeJS.ProcessEnv = process.env,
+  /** Injected fetch; tests stub this so no call can reach the network. */
+  fetch?: JevFetch,
+): JevClient {
+  const apiKey = readJevApiKey(env);
+  if (apiKey === undefined) {
+    throw new JevNotConfigured(
+      "TYPESAFE_API_KEY is not set; export it (or pass --env-file to the CLI) before Jev decisions can run.",
+    );
+  }
+  const client =
+    fetch === undefined ? new TypeSafeClient({ apiKey }) : new TypeSafeClient({ apiKey, fetch });
+  return client as unknown as JevClient;
 }
 
 /** Deterministic JSON used for state hashing (sorted keys, no undefined). */
@@ -401,6 +431,11 @@ export type DecideOptions = {
   /** Injected factory used instead of the default SDK client. */
   clientFactory?: () => JevClient;
   env?: NodeJS.ProcessEnv;
+  /**
+   * Transport override forwarded to the default SDK client. Tests stub this so
+   * the real client, question serialization, and auth path run hermetically.
+   */
+  fetch?: JevFetch;
   /** Per-call timeout in milliseconds, forwarded to the transport. */
   timeoutMs?: number;
   signal?: AbortSignal;
@@ -410,8 +445,9 @@ export type DecideOptions = {
  * Run one System One decision. Fails closed; there is no fallback value.
  *
  * Injection order: `client`, then `clientFactory`, then the default SDK client
- * (which requires TYPESAFE_API_KEY). Any transport failure becomes a
- * {@link JevDecisionError}, so callers branch on success or refusal only.
+ * (built from `env`, which requires TYPESAFE_API_KEY). Any transport failure
+ * becomes a {@link JevDecisionError}, so callers branch on success or refusal
+ * only.
  */
 export async function decide(options: DecideOptions): Promise<JevDecision> {
   const sdkQuestions = buildQuestions(options.questions);
@@ -421,7 +457,7 @@ export async function decide(options: DecideOptions): Promise<JevDecision> {
     const factory = options.clientFactory;
     if (factory === undefined) {
       requireApiKey(env);
-      client = createJevClient();
+      client = createJevClient(env, options.fetch);
     } else {
       client = factory();
     }

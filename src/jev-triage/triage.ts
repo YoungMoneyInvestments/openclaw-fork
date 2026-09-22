@@ -32,6 +32,7 @@ import {
   type JevClient,
   type JevDecision,
   type JevDecisionRecord,
+  type JevFetch,
   type JevQuestion,
 } from "./decision-layer.js";
 
@@ -230,6 +231,8 @@ export type TriageMessageOptions = {
   client?: JevClient;
   /** Injected client factory used instead of the SDK client. */
   clientFactory?: () => JevClient;
+  /** Transport override forwarded to the SDK client (tests stub this). */
+  fetch?: JevFetch;
   /** Model override, e.g. `"jev-1.13.0"`. */
   model?: string;
   hit?: number;
@@ -320,6 +323,7 @@ export async function triageMessage(
     ...(options.client === undefined ? {} : { client: options.client }),
     ...(options.clientFactory === undefined ? {} : { clientFactory: options.clientFactory }),
     env,
+    ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
     ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
     ...(options.signal === undefined ? {} : { signal: options.signal }),
   });

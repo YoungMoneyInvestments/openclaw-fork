@@ -13,11 +13,13 @@ import {
   buildQuestions,
   canonicalJson,
   choiceQuestion,
+  createJevClient,
   decide,
   defaultDecisionLogPath,
   hasJevApiKey,
   normalizeAnswers,
   noulQuestion,
+  readJevApiKey,
   recordDecision,
   redactState,
   route,
@@ -28,6 +30,7 @@ import {
   JEV_DECISION_LOG_VERSION,
   JEV_LIMITS,
   type JevClient,
+  type JevFetch,
 } from "./decision-layer.js";
 import { useHermeticJevEnv } from "./triage.test-support.js";
 
@@ -361,5 +364,62 @@ describe("decision log", () => {
       /\.jev[/\\]decisions\.jsonl$/u,
     );
     expect(defaultDecisionLogPath({})).toMatch(/\.jev[/\\]decisions\.jsonl$/u);
+  });
+});
+
+describe("default transport", () => {
+  /** Minimal SDK transport stub: records auth headers, returns a canned answer. */
+  function stubFetch(): { fetch: JevFetch; auth: (string | null)[]; urls: string[] } {
+    const auth: (string | null)[] = [];
+    const urls: string[] = [];
+    const fetch = (async (url: unknown, init?: RequestInit) => {
+      urls.push(typeof url === "string" ? url : String(url));
+      auth.push(new Headers(init?.headers).get("authorization"));
+      return new Response(
+        JSON.stringify({
+          model: "jev-1.13.0",
+          answers: { actionable: { type: "noul", noul: 0.77 } },
+          usage: { input_tokens: 12, output_tokens: 0 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as unknown as JevFetch;
+    return { fetch, auth, urls };
+  }
+
+  it("authenticates with the injected environment's key, not the ambient one", async () => {
+    process.env.TYPESAFE_API_KEY = "ambient-key-must-not-be-used";
+    const stub = stubFetch();
+
+    const decision = await decide({
+      state: "ship it?",
+      questions: [noulQuestion("actionable", "Is this actionable?")],
+      env: { TYPESAFE_API_KEY: "env-scoped-key" },
+      fetch: stub.fetch,
+    });
+
+    expect(stub.auth).toEqual(["Bearer env-scoped-key"]);
+    expect(stub.urls).toEqual(["https://api.typesafe.ai/v1/systemone"]);
+    expect(decision.answers.actionable).toEqual({
+      name: "actionable",
+      kind: "noul",
+      value: 0.77,
+    });
+    expect(JSON.stringify(decision)).not.toContain("ambient-key-must-not-be-used");
+  });
+
+  it("refuses when the injected environment has no key, even if the process does", () => {
+    process.env.TYPESAFE_API_KEY = "ambient-key-must-not-be-used";
+    const stub = stubFetch();
+
+    expect(() => createJevClient({}, stub.fetch)).toThrow(JevNotConfigured);
+    expect(stub.auth).toEqual([]);
+  });
+
+  it("treats a blank key as missing and still resolves the real client otherwise", () => {
+    expect(hasJevApiKey({ TYPESAFE_API_KEY: "   " })).toBe(false);
+    expect(readJevApiKey({ TYPESAFE_API_KEY: " k " })).toBe("k");
+    expect(() => createJevClient({ TYPESAFE_API_KEY: "  " })).toThrow(JevNotConfigured);
+    expect(createJevClient({ TYPESAFE_API_KEY: "k" }, stubFetch().fetch)).toBeDefined();
   });
 });
