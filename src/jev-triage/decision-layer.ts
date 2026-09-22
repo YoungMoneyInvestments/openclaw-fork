@@ -23,7 +23,7 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
-import { appendFile, chmod, mkdir, stat } from "node:fs/promises";
+import { chmod, mkdir, open, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import {
@@ -665,21 +665,44 @@ export function defaultDecisionLogPath(env: NodeJS.ProcessEnv = process.env): st
 }
 
 /**
- * Append one JSONL record. The record is the private part, so the file is
- * created and kept owner-only (0600): `mode` only applies at creation, which is
- * why the chmod after writing matters, since it is what repairs a log an earlier
- * run left readable. Directories are different: `--log` / `JEV_DECISION_LOG` may
- * point at a caller-managed directory, so permissions are only tightened on a
- * directory this call created - chmodding someone else's directory would revoke
- * access for other users, or fail after the record was already appended.
- * Failures propagate (fail loud).
+ * The slice of `fs.promises.FileHandle` the log writer needs, so tests can pass
+ * a fake handle and assert the order of operations.
  */
-export async function appendDecisionLog(logPath: string, record: JevDecisionRecord): Promise<void> {
+export type LogFileHandle = {
+  chmod: (mode: number) => Promise<void>;
+  appendFile: (data: string, options?: { encoding?: BufferEncoding }) => Promise<void>;
+  close: () => Promise<void>;
+};
+
+async function openLogFile(logPath: string): Promise<LogFileHandle> {
+  return open(logPath, "a", 0o600);
+}
+
+/**
+ * Append one JSONL record, handle-based so the permission repair cannot be
+ * skipped or reordered: open (0600 when it creates the file) -> chmod 0600 ->
+ * append through the same handle -> close. A failed chmod aborts with no write,
+ * so the record never exists under group/other permissions, not even
+ * transiently. The directory is a separate story: `--log` / `JEV_DECISION_LOG`
+ * may point at a caller-managed directory, so it is only tightened when this
+ * call created it. Failures propagate (fail loud).
+ */
+export async function appendDecisionLog(
+  logPath: string,
+  record: JevDecisionRecord,
+  /** Handle opener override for tests; defaults to `fs.promises.open`. */
+  openLog: (logPath: string) => Promise<LogFileHandle> = openLogFile,
+): Promise<void> {
   const directory = path.dirname(logPath);
   const directoryExisted = await pathExists(directory);
   await mkdir(directory, { recursive: true, mode: 0o700 });
-  await appendFile(logPath, `${JSON.stringify(record)}\n`, { encoding: "utf8", mode: 0o600 });
-  await chmod(logPath, 0o600);
+  const handle = await openLog(logPath);
+  try {
+    await handle.chmod(0o600);
+    await handle.appendFile(`${JSON.stringify(record)}\n`, { encoding: "utf8" });
+  } finally {
+    await handle.close();
+  }
   if (!directoryExisted) {
     await chmod(directory, 0o700);
   }

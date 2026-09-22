@@ -396,6 +396,59 @@ describe("decision log", () => {
     );
   });
 
+  it("repairs permissions before writing, and writes nothing when that repair fails", async () => {
+    const root = tempDirs.make("openclaw-jev-order-");
+    const logPath = path.join(root, "decisions.jsonl");
+    const record = buildDecisionRecord(
+      {
+        model: "jev-1.13.0",
+        answers: { actionable: { name: "actionable", kind: "noul", value: 0.93 } },
+        inputTokens: null,
+        outputTokens: null,
+        latencyMs: 1,
+        stateSha256: "3".repeat(64),
+      },
+      { state: MESSAGE_STATE },
+    );
+
+    // Order: chmod, then append through the same handle, then close.
+    const order: string[] = [];
+    await appendDecisionLog(logPath, record, async () => ({
+      chmod: async (mode: number) => {
+        order.push(`chmod:${mode.toString(8)}`);
+      },
+      appendFile: async (data: string) => {
+        order.push(`append:${data.trimEnd().length}`);
+      },
+      close: async () => {
+        order.push("close");
+      },
+    }));
+    expect(order).toHaveLength(3);
+    expect(order[0]).toBe("chmod:600");
+    expect(order[1]?.startsWith("append:")).toBe(true);
+    expect(order[2]).toBe("close");
+
+    // A failing repair aborts with no write and leaves the log byte-identical.
+    writeFileSync(logPath, "existing-line\n", { mode: 0o644 });
+    chmodSync(logPath, 0o644);
+    const before = readFileSync(logPath, "utf8");
+    let wrote = false;
+    await expect(
+      appendDecisionLog(logPath, record, async () => ({
+        chmod: async () => {
+          throw new Error("EPERM: chmod refused");
+        },
+        appendFile: async () => {
+          wrote = true;
+        },
+        close: async () => undefined,
+      })),
+    ).rejects.toThrow("EPERM");
+    expect(wrote).toBe(false);
+    expect(readFileSync(logPath, "utf8")).toBe(before);
+  });
+
   it("resolves the log path from JEV_DECISION_LOG then the home default", () => {
     expect(defaultDecisionLogPath({ JEV_DECISION_LOG: "/tmp/custom.jsonl" })).toBe(
       "/tmp/custom.jsonl",
