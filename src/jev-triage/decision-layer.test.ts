@@ -3,7 +3,7 @@
  * injects a transport, and `useHermeticJevEnv` clears any ambient key first.
  */
 
-import { readFileSync, statSync, chmodSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
@@ -356,7 +356,7 @@ describe("decision log", () => {
     );
   });
 
-  it("writes the log owner-only and heals a world-readable log from an earlier run", async () => {
+  it("writes owner-only logs, heals a readable log, and leaves a caller's directory alone", async () => {
     const root = tempDirs.make("openclaw-jev-perms-");
     const dir = path.join(root, "logs");
     const logPath = path.join(dir, "decisions.jsonl");
@@ -372,17 +372,28 @@ describe("decision log", () => {
       { state: MESSAGE_STATE },
     );
 
+    // A directory and log an earlier run left readable by others.
+    mkdirSync(dir, { recursive: true });
+    chmodSync(dir, 0o755);
+    writeFileSync(logPath, "", { mode: 0o644 });
+    chmodSync(logPath, 0o644);
+
     await appendDecisionLog(logPath, record);
     expect(statSync(logPath).mode & 0o777).toBe(0o600);
-    expect(statSync(dir).mode & 0o777).toBe(0o700);
+    // The directory is the caller's, so its mode is left as it was.
+    expect(statSync(dir).mode & 0o777).toBe(0o755);
 
-    // A log an earlier run created world-readable must be repaired, not left open.
-    chmodSync(logPath, 0o644);
-    chmodSync(dir, 0o755);
-    await appendDecisionLog(logPath, { ...record, decision_id: "jevd_healed" });
-    expect(statSync(logPath).mode & 0o777).toBe(0o600);
-    expect(statSync(dir).mode & 0o777).toBe(0o700);
-    expect(readFileSync(logPath, "utf8").trimEnd().split("\n")).toHaveLength(2);
+    // A directory this code creates is owner-only from the start.
+    const ownDir = path.join(root, "created");
+    const ownLog = path.join(ownDir, "decisions.jsonl");
+    await appendDecisionLog(ownLog, { ...record, decision_id: "jevd_owned" });
+    expect(statSync(ownDir).mode & 0o777).toBe(0o700);
+    expect(statSync(ownLog).mode & 0o777).toBe(0o600);
+    const lines = readFileSync(logPath, "utf8").trimEnd().split("\n");
+    expect(lines).toHaveLength(1);
+    expect((JSON.parse(lines[0] as string) as { decision_id: string }).decision_id).toBe(
+      record.decision_id,
+    );
   });
 
   it("resolves the log path from JEV_DECISION_LOG then the home default", () => {

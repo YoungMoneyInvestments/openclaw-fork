@@ -23,7 +23,7 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
-import { appendFile, chmod, mkdir } from "node:fs/promises";
+import { appendFile, chmod, mkdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import {
@@ -665,18 +665,37 @@ export function defaultDecisionLogPath(env: NodeJS.ProcessEnv = process.env): st
 }
 
 /**
- * Append one JSONL record. Creates parents with owner-only permissions, writes
- * the line as owner-only, and heals the mode of a pre-existing log: records hold
- * message text, so a 0644 log under a traversable path would expose private
- * excerpts to other local users. `mode` only applies at creation, so the chmod
- * after writing is what actually repairs a log an earlier run left readable.
+ * Append one JSONL record. The record is the private part, so the file is
+ * created and kept owner-only (0600): `mode` only applies at creation, which is
+ * why the chmod after writing matters, since it is what repairs a log an earlier
+ * run left readable. Directories are different: `--log` / `JEV_DECISION_LOG` may
+ * point at a caller-managed directory, so permissions are only tightened on a
+ * directory this call created - chmodding someone else's directory would revoke
+ * access for other users, or fail after the record was already appended.
  * Failures propagate (fail loud).
  */
 export async function appendDecisionLog(logPath: string, record: JevDecisionRecord): Promise<void> {
-  await mkdir(path.dirname(logPath), { recursive: true, mode: 0o700 });
+  const directory = path.dirname(logPath);
+  const directoryExisted = await pathExists(directory);
+  await mkdir(directory, { recursive: true, mode: 0o700 });
   await appendFile(logPath, `${JSON.stringify(record)}\n`, { encoding: "utf8", mode: 0o600 });
   await chmod(logPath, 0o600);
-  await chmod(path.dirname(logPath), 0o700);
+  if (!directoryExisted) {
+    await chmod(directory, 0o700);
+  }
+}
+
+/** True when the path exists; any other stat failure propagates. */
+async function pathExists(target: string): Promise<boolean> {
+  try {
+    await stat(target);
+    return true;
+  } catch (error) {
+    if ((error as { code?: unknown }).code === "ENOENT") {
+      return false;
+    }
+    throw error;
+  }
 }
 
 /** Build and append the decision record; returns it for callers that want it. */
