@@ -31,6 +31,8 @@ minimumReleaseAgeExclude:
   - "jszip@3.10.2"
   # GHSA-prgh-xp8r-p3m5 / GHSA-v53p-9fqp-m79j security fixes; remove after 2026-09-18.
   - "nodemailer@10.0.8"
+  # Jev (TypeSafe System One) SDK for the Jev message-triage lane; remove after 2026-09-22 18:18 UTC.
+  - "@typesafe-ai/sdk@0.6.0"
 
 # Isolated installs let pnpm reuse whole-package APFS clones instead of relinking every file.
 nodeLinker: isolated
