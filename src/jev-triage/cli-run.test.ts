@@ -12,7 +12,7 @@ import {
   runTriageCli,
   type TriageCliDeps,
 } from "./cli-run.js";
-import { JevDecisionError, JevNotConfigured } from "./decision-layer.js";
+import { JevDecisionError, JevNotConfigured, type JevFetch } from "./decision-layer.js";
 import {
   JevTriageDisabled,
   normalizeTriageMessage,
@@ -99,6 +99,94 @@ function run(argv: readonly string[], test: Harness, overrides: Partial<TriageCl
     ...overrides,
   });
 }
+
+describe("runTriageCli with the real transport (stubbed fetch)", () => {
+  const SENTINEL = "SENTINEL-BODY-TEXT-do-not-log";
+
+  function stubSdkFetch(): { fetch: JevFetch; bodies: string[] } {
+    const bodies: string[] = [];
+    const fetch = (async (url: string, init?: RequestInit) => {
+      bodies.push(typeof init?.body === "string" ? init.body : "");
+      return new Response(
+        JSON.stringify({
+          model: "jev-1.13.0",
+          answers: {
+            actionable: { type: "noul", noul: 0.93 },
+            category: { type: "choice", choice: "member_support", confidence: 0.8 },
+            priority: { type: "score", score: 2.4, confidence: 0.6 },
+          },
+          usage: { input_tokens: 431, output_tokens: 0 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as unknown as JevFetch;
+    return { fetch, bodies };
+  }
+
+  it("keeps stdout pure JSONL when TYPESAFE_LOG_LEVEL=debug is set", async () => {
+    const test = harness();
+    const stub = stubSdkFetch();
+    test.files.set(
+      "/tmp/messages.json",
+      JSON.stringify([
+        {
+          id: "sdk-debug",
+          from: "customer@example.com",
+          subject: "Help",
+          body: SENTINEL,
+          received_at: "2026-09-21T15:04:05Z",
+        },
+      ]),
+    );
+    test.env.TYPESAFE_API_KEY = "test-key";
+    test.env.TYPESAFE_LOG_LEVEL = "debug";
+
+    const code = await run(["/tmp/messages.json", "--no-log"], test, {
+      transport: { fetch: stub.fetch },
+    });
+
+    expect(code).toBe(TRIAGE_EXIT.ok);
+    expect(stub.bodies).toHaveLength(1);
+    // Every stdout line must be a parseable decision; no SDK diagnostics anywhere.
+    expect(test.stdout.length).toBeGreaterThan(0);
+    for (const line of test.stdout) {
+      expect(JSON.parse(line)).toBeTypeOf("object");
+      expect(line).not.toContain("[typesafe-sdk]");
+      expect(line).not.toContain(SENTINEL);
+    }
+    expect(test.stderr.join("\n")).not.toContain("[typesafe-sdk]");
+    expect(test.stderr.join("\n")).not.toContain(SENTINEL);
+  });
+
+  it("forwards --sdk-log-level and rejects an unknown level", async () => {
+    const test = harness();
+    const stub = stubSdkFetch();
+    test.files.set(
+      "/tmp/messages.json",
+      JSON.stringify([
+        {
+          id: "sdk-off",
+          from: "customer@example.com",
+          subject: "Help",
+          body: "hello",
+          received_at: "2026-09-21T15:04:05Z",
+        },
+      ]),
+    );
+    test.env.TYPESAFE_API_KEY = "test-key";
+
+    const code = await run(["/tmp/messages.json", "--no-log", "--sdk-log-level", "off"], test, {
+      transport: { fetch: stub.fetch },
+    });
+    expect(code).toBe(TRIAGE_EXIT.ok);
+    expect(test.stderr).toEqual([]);
+
+    const bad = harness();
+    const badCode = await run(["/tmp/messages.json", "--sdk-log-level", "loud"], bad);
+    expect(badCode).toBe(TRIAGE_EXIT.badInput);
+    expect(bad.stderr.join("\n")).toContain("--sdk-log-level expects one of");
+  });
+});
 
 describe("parseTriageMessages", () => {
   it("accepts an array, a messages wrapper, a single object, and JSONL", () => {

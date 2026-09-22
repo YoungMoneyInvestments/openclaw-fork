@@ -23,7 +23,7 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
-import { appendFile, mkdir } from "node:fs/promises";
+import { appendFile, chmod, mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import {
@@ -32,7 +32,12 @@ import {
   noul as sdkNoul,
   score as sdkScore,
 } from "@typesafe-ai/sdk";
-import type { Fetch as SdkFetch, Question } from "@typesafe-ai/sdk";
+import type {
+  Fetch as SdkFetch,
+  Logger as SdkLogger,
+  LogLevel as SdkLogLevel,
+  Question,
+} from "@typesafe-ai/sdk";
 
 export const JEV_DECISION_LOG_VERSION = "jev_decision_log.v1";
 
@@ -292,6 +297,57 @@ function requireApiKey(env: NodeJS.ProcessEnv): void {
 /** Transport override for tests and callers that bring their own fetch. */
 export type JevFetch = SdkFetch;
 
+/** SDK log levels, re-exported so callers can opt into more or less noise. */
+export type JevLogLevel = SdkLogLevel;
+
+/** The accepted SDK log levels, in escalating verbosity order. */
+export const JEV_LOG_LEVELS: readonly JevLogLevel[] = ["off", "error", "warn", "info", "debug"];
+
+/**
+ * SDK log level used unless a caller overrides it, pinned explicitly because
+ * the SDK otherwise resolves `config.logLevel` -> ambient `TYPESAFE_LOG_LEVEL`
+ * -> its own default: `info`/`debug` write to stdout through
+ * `console.info`/`console.debug` (breaking the CLI's one-JSON-object-per-line
+ * contract) and `debug` logs request bodies, i.e. message text. `off` cannot be
+ * raised by the ambient environment.
+ */
+export const JEV_SDK_LOG_LEVEL_DEFAULT: JevLogLevel = "off";
+
+/**
+ * SDK logger routed to stderr, so no SDK diagnostic can ever contaminate the
+ * stdout decision stream regardless of the configured level.
+ */
+const stderrSdkLogger: SdkLogger = {
+  debug: (message, ...args) => writeSdkDiagnostic("debug", message, args),
+  info: (message, ...args) => writeSdkDiagnostic("info", message, args),
+  warn: (message, ...args) => writeSdkDiagnostic("warn", message, args),
+  error: (message, ...args) => writeSdkDiagnostic("error", message, args),
+};
+
+function writeSdkDiagnostic(level: string, message: string, args: readonly unknown[]): void {
+  const detail = args
+    .map((value) => {
+      if (typeof value === "string") {
+        return value;
+      }
+      try {
+        return JSON.stringify(value) ?? String(value);
+      } catch {
+        return "<unserializable>";
+      }
+    })
+    .join(" ");
+  process.stderr.write(`[jev-sdk] ${level} ${message}${detail.length > 0 ? ` ${detail}` : ""}\n`);
+}
+
+/** Transport knobs shared by {@link createJevClient}, {@link decide}, and triage. */
+export type JevTransportOptions = {
+  /** Injected fetch; tests stub this so no call can reach the network. */
+  fetch?: JevFetch;
+  /** SDK diagnostics; defaults to {@link JEV_SDK_LOG_LEVEL_DEFAULT}. */
+  logLevel?: JevLogLevel;
+};
+
 /**
  * Default client factory. The SDK constructor reads the ambient environment
  * when `apiKey` is omitted, which would ignore a caller-supplied environment
@@ -300,8 +356,7 @@ export type JevFetch = SdkFetch;
  */
 export function createJevClient(
   env: NodeJS.ProcessEnv = process.env,
-  /** Injected fetch; tests stub this so no call can reach the network. */
-  fetch?: JevFetch,
+  options: JevTransportOptions = {},
 ): JevClient {
   const apiKey = readJevApiKey(env);
   if (apiKey === undefined) {
@@ -309,8 +364,12 @@ export function createJevClient(
       "TYPESAFE_API_KEY is not set; export it (or pass --env-file to the CLI) before Jev decisions can run.",
     );
   }
-  const client =
-    fetch === undefined ? new TypeSafeClient({ apiKey }) : new TypeSafeClient({ apiKey, fetch });
+  const client = new TypeSafeClient({
+    apiKey,
+    logLevel: options.logLevel ?? JEV_SDK_LOG_LEVEL_DEFAULT,
+    logger: stderrSdkLogger,
+    ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
+  });
   return client as unknown as JevClient;
 }
 
@@ -436,6 +495,12 @@ export type DecideOptions = {
    * the real client, question serialization, and auth path run hermetically.
    */
   fetch?: JevFetch;
+  /**
+   * SDK log level for the default client. Defaults to
+   * {@link JEV_SDK_LOG_LEVEL_DEFAULT} (`warn`, stderr only) so SDK diagnostics
+   * cannot pollute stdout or emit message text.
+   */
+  logLevel?: JevLogLevel;
   /** Per-call timeout in milliseconds, forwarded to the transport. */
   timeoutMs?: number;
   signal?: AbortSignal;
@@ -457,7 +522,10 @@ export async function decide(options: DecideOptions): Promise<JevDecision> {
     const factory = options.clientFactory;
     if (factory === undefined) {
       requireApiKey(env);
-      client = createJevClient(env, options.fetch);
+      client = createJevClient(env, {
+        ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
+        ...(options.logLevel === undefined ? {} : { logLevel: options.logLevel }),
+      });
     } else {
       client = factory();
     }
@@ -596,10 +664,19 @@ export function defaultDecisionLogPath(env: NodeJS.ProcessEnv = process.env): st
     : path.join(homedir(), ".jev", "decisions.jsonl");
 }
 
-/** Append one JSONL record. Creates parents; failures propagate (fail loud). */
+/**
+ * Append one JSONL record. Creates parents with owner-only permissions, writes
+ * the line as owner-only, and heals the mode of a pre-existing log: records hold
+ * message text, so a 0644 log under a traversable path would expose private
+ * excerpts to other local users. `mode` only applies at creation, so the chmod
+ * after writing is what actually repairs a log an earlier run left readable.
+ * Failures propagate (fail loud).
+ */
 export async function appendDecisionLog(logPath: string, record: JevDecisionRecord): Promise<void> {
-  await mkdir(path.dirname(logPath), { recursive: true });
-  await appendFile(logPath, `${JSON.stringify(record)}\n`, "utf8");
+  await mkdir(path.dirname(logPath), { recursive: true, mode: 0o700 });
+  await appendFile(logPath, `${JSON.stringify(record)}\n`, { encoding: "utf8", mode: 0o600 });
+  await chmod(logPath, 0o600);
+  await chmod(path.dirname(logPath), 0o700);
 }
 
 /** Build and append the decision record; returns it for callers that want it. */

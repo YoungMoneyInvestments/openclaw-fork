@@ -4,6 +4,7 @@
  * Usage:
  *   pnpm jev:triage MESSAGES.json [--env-file PATH] [--log PATH] [--no-log]
  *                                 [--model NAME] [--hit 0.7] [--miss 0.3]
+ *                                 [--sdk-log-level off|error|warn|info|debug]
  *   cat MESSAGES.json | pnpm jev:triage -
  *
  * Input is either a JSON array of messages, an object with a `messages` array,
@@ -17,7 +18,14 @@
  */
 
 import { readFile } from "node:fs/promises";
-import { JevDecisionError, JevError, JevNotConfigured } from "./decision-layer.js";
+import {
+  JEV_LOG_LEVELS,
+  JevDecisionError,
+  JevError,
+  JevNotConfigured,
+  type JevLogLevel,
+  type JevTransportOptions,
+} from "./decision-layer.js";
 import {
   JevTriageDisabled,
   normalizeTriageMessage,
@@ -44,15 +52,24 @@ export type TriageCliDeps = {
   stderr: (line: string) => void;
   readTextFile: (filePath: string) => Promise<string>;
   readStdin: () => Promise<string>;
+  /**
+   * Transport override handed to every triage call. Tests point this at a stub
+   * fetch so the real SDK client, serialization, and logging path run without
+   * touching the network.
+   */
+  transport?: JevTransportOptions;
 };
 
 const USAGE = [
   "Usage: jev-triage MESSAGES.json [--env-file PATH] [--log PATH] [--no-log]",
   "                            [--model NAME] [--hit 0.7] [--miss 0.3]",
+  "                            [--sdk-log-level off|error|warn|info|debug]",
   "       cat MESSAGES.json | jev-triage -",
   "",
   "Input: JSON array, {messages: [...]}, one message object, or JSONL.",
   "Message fields: from, subject, body, received_at (ISO-8601), optional id.",
+  "Output: one JSON decision per line on stdout. SDK diagnostics go to stderr and",
+  "are off by default; --sdk-log-level debug includes request bodies (message text).",
   "Exit codes: 0 ok · 2 bad input/usage · 3 not configured · 4 decision failed · 5 input unreadable.",
 ].join("\n");
 
@@ -72,6 +89,7 @@ function defaultDeps(overrides: Partial<TriageCliDeps>): TriageCliDeps {
         }
         return Buffer.concat(chunks).toString("utf8");
       }),
+    ...(overrides.transport === undefined ? {} : { transport: overrides.transport }),
   };
 }
 
@@ -176,6 +194,7 @@ type ParsedArgs = {
   model?: string;
   hit?: number;
   miss?: number;
+  sdkLogLevel?: JevLogLevel;
   help: boolean;
 };
 
@@ -185,6 +204,15 @@ function parseNumber(flag: string, value: string): number {
     throw new Error(`${flag} expects a number, got ${JSON.stringify(value)}`);
   }
   return parsed;
+}
+
+function parseSdkLogLevel(value: string): JevLogLevel {
+  if (!JEV_LOG_LEVELS.includes(value as JevLogLevel)) {
+    throw new Error(
+      `--sdk-log-level expects one of ${JEV_LOG_LEVELS.join(", ")}, got ${JSON.stringify(value)}`,
+    );
+  }
+  return value as JevLogLevel;
 }
 
 function parseArgs(argv: readonly string[]): ParsedArgs {
@@ -214,6 +242,8 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
       parsed.hit = parseNumber("--hit", next());
     } else if (arg === "--miss") {
       parsed.miss = parseNumber("--miss", next());
+    } else if (arg === "--sdk-log-level") {
+      parsed.sdkLogLevel = parseSdkLogLevel(next());
     } else if (arg === "-h" || arg === "--help") {
       parsed.help = true;
     } else if (arg.startsWith("--")) {
@@ -301,6 +331,8 @@ export async function runTriageCli(
     ...(args.miss === undefined ? {} : { miss: args.miss }),
     ...(args.noLog ? { log: false } : {}),
     ...(args.logPath === undefined ? {} : { logPath: args.logPath }),
+    ...(args.sdkLogLevel === undefined ? {} : { logLevel: args.sdkLogLevel }),
+    ...(deps.transport === undefined ? {} : deps.transport),
   };
 
   for (const [index, message] of messages.entries()) {

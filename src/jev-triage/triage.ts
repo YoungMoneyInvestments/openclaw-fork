@@ -33,6 +33,7 @@ import {
   type JevDecision,
   type JevDecisionRecord,
   type JevFetch,
+  type JevLogLevel,
   type JevQuestion,
 } from "./decision-layer.js";
 
@@ -233,6 +234,12 @@ export type TriageMessageOptions = {
   clientFactory?: () => JevClient;
   /** Transport override forwarded to the SDK client (tests stub this). */
   fetch?: JevFetch;
+  /**
+   * SDK diagnostic level for the default client. Defaults to `off`; anything
+   * other than `off` writes SDK diagnostics to stderr, and `debug` includes
+   * request bodies (message text).
+   */
+  logLevel?: JevLogLevel;
   /** Model override, e.g. `"jev-1.13.0"`. */
   model?: string;
   hit?: number;
@@ -324,6 +331,7 @@ export async function triageMessage(
     ...(options.clientFactory === undefined ? {} : { clientFactory: options.clientFactory }),
     env,
     ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
+    ...(options.logLevel === undefined ? {} : { logLevel: options.logLevel }),
     ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
     ...(options.signal === undefined ? {} : { signal: options.signal }),
   });

@@ -3,9 +3,9 @@
  * injects a transport, and `useHermeticJevEnv` clears any ambient key first.
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync, chmodSync } from "node:fs";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import {
   JevDecisionError,
@@ -356,6 +356,35 @@ describe("decision log", () => {
     );
   });
 
+  it("writes the log owner-only and heals a world-readable log from an earlier run", async () => {
+    const root = tempDirs.make("openclaw-jev-perms-");
+    const dir = path.join(root, "logs");
+    const logPath = path.join(dir, "decisions.jsonl");
+    const record = buildDecisionRecord(
+      {
+        model: "jev-1.13.0",
+        answers: { actionable: { name: "actionable", kind: "noul", value: 0.93 } },
+        inputTokens: null,
+        outputTokens: null,
+        latencyMs: 1,
+        stateSha256: "2".repeat(64),
+      },
+      { state: MESSAGE_STATE },
+    );
+
+    await appendDecisionLog(logPath, record);
+    expect(statSync(logPath).mode & 0o777).toBe(0o600);
+    expect(statSync(dir).mode & 0o777).toBe(0o700);
+
+    // A log an earlier run created world-readable must be repaired, not left open.
+    chmodSync(logPath, 0o644);
+    chmodSync(dir, 0o755);
+    await appendDecisionLog(logPath, { ...record, decision_id: "jevd_healed" });
+    expect(statSync(logPath).mode & 0o777).toBe(0o600);
+    expect(statSync(dir).mode & 0o777).toBe(0o700);
+    expect(readFileSync(logPath, "utf8").trimEnd().split("\n")).toHaveLength(2);
+  });
+
   it("resolves the log path from JEV_DECISION_LOG then the home default", () => {
     expect(defaultDecisionLogPath({ JEV_DECISION_LOG: "/tmp/custom.jsonl" })).toBe(
       "/tmp/custom.jsonl",
@@ -412,7 +441,7 @@ describe("default transport", () => {
     process.env.TYPESAFE_API_KEY = "ambient-key-must-not-be-used";
     const stub = stubFetch();
 
-    expect(() => createJevClient({}, stub.fetch)).toThrow(JevNotConfigured);
+    expect(() => createJevClient({}, { fetch: stub.fetch })).toThrow(JevNotConfigured);
     expect(stub.auth).toEqual([]);
   });
 
@@ -420,6 +449,56 @@ describe("default transport", () => {
     expect(hasJevApiKey({ TYPESAFE_API_KEY: "   " })).toBe(false);
     expect(readJevApiKey({ TYPESAFE_API_KEY: " k " })).toBe("k");
     expect(() => createJevClient({ TYPESAFE_API_KEY: "  " })).toThrow(JevNotConfigured);
-    expect(createJevClient({ TYPESAFE_API_KEY: "k" }, stubFetch().fetch)).toBeDefined();
+    expect(createJevClient({ TYPESAFE_API_KEY: "k" }, { fetch: stubFetch().fetch })).toBeDefined();
+  });
+
+  it("keeps SDK diagnostics off stdout even when TYPESAFE_LOG_LEVEL asks for debug", async () => {
+    // The ambient knob the SDK would otherwise honour, plus a caller-supplied
+    // environment that does the same: neither may lift the pinned level.
+    process.env.TYPESAFE_LOG_LEVEL = "debug";
+    const consoleSpies = [
+      vi.spyOn(console, "debug").mockImplementation(() => undefined),
+      vi.spyOn(console, "info").mockImplementation(() => undefined),
+    ];
+    const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const stub = stubFetch();
+    try {
+      await decide({
+        state: "debug me?",
+        questions: [noulQuestion("actionable", "Is this actionable?")],
+        env: { TYPESAFE_API_KEY: "test-key", TYPESAFE_LOG_LEVEL: "debug" },
+        fetch: stub.fetch,
+      });
+      expect(stdoutSpy).not.toHaveBeenCalled();
+      expect(consoleSpies[0]).not.toHaveBeenCalled();
+      expect(consoleSpies[1]).not.toHaveBeenCalled();
+    } finally {
+      for (const spy of consoleSpies) {
+        spy.mockRestore();
+      }
+      stdoutSpy.mockRestore();
+    }
+  });
+
+  it("routes an explicit debug opt-in to stderr, never stdout", async () => {
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const stub = stubFetch();
+    try {
+      await decide({
+        state: "debug me?",
+        questions: [noulQuestion("actionable", "Is this actionable?")],
+        env: { TYPESAFE_API_KEY: "test-key" },
+        fetch: stub.fetch,
+        logLevel: "debug",
+      });
+      expect(stderrSpy).toHaveBeenCalled();
+      expect(stdoutSpy).not.toHaveBeenCalled();
+      const written = stderrSpy.mock.calls.map((call) => String(call[0])).join("");
+      expect(written).toContain("[jev-sdk]");
+    } finally {
+      stderrSpy.mockRestore();
+      stdoutSpy.mockRestore();
+    }
   });
 });
