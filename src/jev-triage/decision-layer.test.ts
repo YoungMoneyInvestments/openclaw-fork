@@ -480,6 +480,19 @@ describe("default transport", () => {
     return { fetch, auth, urls };
   }
 
+  it.each([42, true])(
+    "refuses unsupported primitive SDK state %s before transport",
+    async (state) => {
+      const stub = stubFetch();
+      const client = createJevClient(
+        { TYPESAFE_API_KEY: "synthetic-test-key" },
+        { fetch: stub.fetch },
+      );
+      await expect(client.systemOne({ state, questions: {} })).rejects.toThrow(JevDecisionError);
+      expect(stub.urls).toEqual([]);
+    },
+  );
+
   it("authenticates with the injected environment's key, not the ambient one", async () => {
     process.env.TYPESAFE_API_KEY = "ambient-key-must-not-be-used";
     const stub = stubFetch();

@@ -373,8 +373,15 @@ export function createJevClient(
     logger: stderrSdkLogger,
     ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
   });
-  // SAFETY: the SDK implements systemOne; its wire answers are normalized before use.
-  return client as unknown as JevClient;
+  return {
+    systemOne: async (request, requestOptions) => {
+      const state = request.state;
+      if (typeof state === "number" || typeof state === "boolean") {
+        throw new JevDecisionError("SDK state must be text, a JSON object or array, or null");
+      }
+      return client.systemOne({ ...request, state }, requestOptions);
+    },
+  };
 }
 
 /** Deterministic JSON used for state hashing (sorted keys, no undefined). */

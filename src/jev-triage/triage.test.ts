@@ -298,7 +298,11 @@ describe("triageMessage", () => {
     ["priority", "confidence", -1],
   ])("refuses out-of-range %s %s", async (name, field, value) => {
     const response = triageResponse() as { answers: Record<string, Record<string, unknown>> };
-    response.answers[name][field] = value;
+    const answer = response.answers[name];
+    if (answer === undefined) {
+      throw new Error(`missing synthetic answer: ${name}`);
+    }
+    answer[field] = value;
     const { client } = fakeClient(response);
     await expect(triageMessage(MESSAGE, { client, log: false })).rejects.toThrow(JevDecisionError);
   });
