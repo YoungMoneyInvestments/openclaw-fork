@@ -293,6 +293,24 @@ export function readTriageAnswers(decision: JevDecision): TriageAnswers {
   if (typeof actionable.value !== "number" || typeof priority.value !== "number") {
     throw new JevDecisionError("Jev returned non-numeric answers for actionable/priority");
   }
+  if (
+    !Number.isFinite(actionable.value) ||
+    actionable.value < 0 ||
+    actionable.value > 1 ||
+    !Number.isFinite(priority.value) ||
+    priority.value < 0 ||
+    priority.value > TRIAGE_PRIORITY_RUBRIC.length - 1
+  ) {
+    throw new JevDecisionError("Jev returned out-of-range answers for actionable/priority");
+  }
+  for (const answer of [category, priority]) {
+    if (
+      answer.confidence !== undefined &&
+      (!Number.isFinite(answer.confidence) || answer.confidence < 0 || answer.confidence > 1)
+    ) {
+      throw new JevDecisionError(`Jev returned out-of-range confidence for ${answer.name}`);
+    }
+  }
   return {
     actionable: { probability: actionable.value },
     category: {

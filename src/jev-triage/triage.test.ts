@@ -290,6 +290,19 @@ describe("triageMessage", () => {
     expect(result.route.decision).toBe("hit");
   });
 
+  it.each([
+    ["actionable", "noul", 2],
+    ["priority", "score", -1],
+    ["priority", "score", 99],
+    ["category", "confidence", 2],
+    ["priority", "confidence", -1],
+  ])("refuses out-of-range %s %s", async (name, field, value) => {
+    const response = triageResponse() as { answers: Record<string, Record<string, unknown>> };
+    response.answers[name][field] = value;
+    const { client } = fakeClient(response);
+    await expect(triageMessage(MESSAGE, { client, log: false })).rejects.toThrow(JevDecisionError);
+  });
+
   it("reads triage answers strictly", () => {
     const decision = {
       model: "jev-1.13.0",
