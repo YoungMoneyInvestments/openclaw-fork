@@ -52,8 +52,13 @@ describe("RequestClient", () => {
       readDmRecipients: () => recipients,
       scheduler: { maxConcurrency: 1 },
       fetch: async (input, init) => {
-        const path = new URL(String(input)).pathname.replace("/api/v10", "");
-        if (init?.method === "GET") return createJsonResponse(channels[path.split("/")[2]] ?? {});
+        const url =
+          input instanceof Request ? input.url : input instanceof URL ? input.href : input;
+        const path = new URL(url).pathname.replace("/api/v10", "");
+        if (init?.method === "GET") {
+          const channelId = path.split("/")[2];
+          return createJsonResponse(channelId === undefined ? {} : (channels[channelId] ?? {}));
+        }
         writes.push(path);
         return createJsonResponse({ id: "sent" });
       },
