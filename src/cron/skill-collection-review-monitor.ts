@@ -30,7 +30,7 @@ function allowsWorkshopMaintenance(cfg: OpenClawConfig, agentId: string): boolea
   const entry = listAgentEntriesWithSource(cfg).find(
     ({ entry: candidate }) => normalizeAgentId(candidate.id ?? "") === normalizeAgentId(agentId),
   )?.entry;
-  const layers = [cfg.tools, entry?.tools ?? cfg.agents?.defaults?.tools].filter(
+  const layers = [cfg.tools, entry?.tools].filter(
     (layer): layer is ExplicitToolAllowList =>
       Array.isArray(layer?.allow) && layer.allow.length > 0,
   );
