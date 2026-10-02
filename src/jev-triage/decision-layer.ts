@@ -55,7 +55,7 @@ const QUESTION_NAME_PATTERN = /^[a-z][a-z0-9_]{0,63}$/u;
 const SECRET_KEY_PATTERN = /(api[_-]?key|token|secret|password|passwd|credential|authorization)/iu;
 
 /** JSON-compatible value; the shape `state` accepts. */
-export type JevJson = string | number | boolean | null | JevJson[] | { [key: string]: JevJson };
+type JevJson = string | number | boolean | null | JevJson[] | { [key: string]: JevJson };
 
 /** Base class for decision-layer failures. */
 export class JevError extends Error {}
@@ -67,7 +67,7 @@ export class JevNotConfigured extends JevError {}
 export class JevDecisionError extends JevError {}
 
 /** Question kinds System One answers. */
-export type JevQuestionKind = "noul" | "choice" | "score";
+type JevQuestionKind = "noul" | "choice" | "score";
 
 /** One validated typed question. Build through {@link noulQuestion} and friends. */
 export type JevQuestion = {

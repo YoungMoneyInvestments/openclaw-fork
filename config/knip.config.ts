@@ -530,6 +530,11 @@ const config = {
     // Greeting cache/fact contracts (hash, alert text, store shapes) are
     // asserted by the focused greeting unit tests, not by another prod module.
     "src/system-agent/greeting.ts": ["exports", "types"],
+    // Advisory triage tests exercise parsing, validated transport, routing, and redaction seams.
+    // The separate all-exports pass verifies their actual test consumers.
+    "src/jev-triage/cli-run.ts": ["exports"],
+    "src/jev-triage/decision-layer.ts": ["exports", "types"],
+    "src/jev-triage/triage.ts": ["exports", "types"],
     // Focused tests consume these diagnostic/test seams; production code uses
     // the surrounding runtime helpers rather than importing the exports.
     "extensions/signal/src/setup-core.ts": ["exports"],

@@ -41,10 +41,10 @@ import {
 export const TRIAGE_QUESTION_SET_VERSION = "openclaw_message_triage.v1";
 
 /** Default thresholds for the `actionable` route. */
-export const TRIAGE_ROUTE_DEFAULTS = { hit: 0.7, miss: 0.3 } as const;
+const TRIAGE_ROUTE_DEFAULTS = { hit: 0.7, miss: 0.3 } as const;
 
 /** Input caps; longer fields are truncated before they reach Jev or the log. */
-export const TRIAGE_MESSAGE_LIMITS = {
+const TRIAGE_MESSAGE_LIMITS = {
   fromChars: 320,
   subjectChars: 500,
   bodyChars: 8_000,
@@ -103,7 +103,7 @@ export const TRIAGE_QUESTIONS: readonly JevQuestion[] = Object.freeze([
 ]);
 
 /** Question names in the order they are asked. */
-export const TRIAGE_QUESTION_NAMES = ["actionable", "category", "priority"] as const;
+const TRIAGE_QUESTION_NAMES = ["actionable", "category", "priority"] as const;
 
 /** Raised when the `JEV_TRIAGE_DISABLED` kill switch is engaged. */
 export class JevTriageDisabled extends JevError {}
@@ -124,7 +124,7 @@ function assertTriageEnabled(env: NodeJS.ProcessEnv): void {
 }
 
 /** One inbound message, exactly as the CLI and callers supply it. */
-export type TriageMessageInput = {
+type TriageMessageInput = {
   /** Sender identity, e.g. `"discord:1234"` or an email address. */
   from: string;
   subject: string;
@@ -219,7 +219,7 @@ export type TriageAnswers = {
 };
 
 /** Route verdict for the `actionable` question. */
-export type TriageRoute = {
+type TriageRoute = {
   name: "actionable";
   probability: number;
   hit: number;
