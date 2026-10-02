@@ -187,6 +187,7 @@ export function buildQuestions(questions: readonly JevQuestion[]): Record<string
 
 function toSdkQuestion(question: JevQuestion): Question {
   if (question.kind === "noul") {
+    // SAFETY: noulQuestion validates optional criteria as a string-valued record.
     const criteria = question.criteria as Readonly<Record<string, string>> | undefined;
     return criteria === undefined
       ? sdkNoul(question.instructions)
@@ -194,9 +195,11 @@ function toSdkQuestion(question: JevQuestion): Question {
   }
   if (question.kind === "choice") {
     return sdkChoice(question.instructions, {
+      // SAFETY: choiceQuestion requires a validated string-valued criteria record.
       ...(question.criteria as Readonly<Record<string, string>>),
     });
   }
+  // SAFETY: scoreQuestion validates criteria as ordered, non-blank string levels.
   const rubric = question.criteria as readonly string[];
   const [firstLevel, secondLevel, ...restLevels] = rubric;
   if (firstLevel === undefined || secondLevel === undefined) {
@@ -370,6 +373,7 @@ export function createJevClient(
     logger: stderrSdkLogger,
     ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
   });
+  // SAFETY: the SDK implements systemOne; its wire answers are normalized before use.
   return client as unknown as JevClient;
 }
 
@@ -384,7 +388,7 @@ export function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) {
     return `[${value.map((item) => canonicalJson(item ?? null)).join(",")}]`;
   }
-  const entries = Object.entries(value as Record<string, unknown>)
+  const entries = Object.entries(value)
     .filter(([, item]) => item !== undefined)
     .toSorted(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
   return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`).join(",")}}`;
@@ -414,7 +418,7 @@ function toProbabilityRecord(value: unknown): Record<string, number> | undefined
     return undefined;
   }
   const probabilities: Record<string, number> = {};
-  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+  for (const [key, raw] of Object.entries(value)) {
     const parsed = toOptionalNumber(raw);
     if (parsed !== undefined) {
       probabilities[key] = parsed;
@@ -428,13 +432,15 @@ function toProbabilityRecord(value: unknown): Record<string, number> | undefined
  * forward-compatibility; a response with none left fails the decision.
  */
 export function normalizeAnswers(response: unknown): Record<string, JevAnswer> {
+  // SAFETY: this probes only the answers field; every answer shape is checked below.
   const raw = (response as RawSystemOneResponse | null)?.answers;
   const normalized: Record<string, JevAnswer> = {};
   if (raw !== null && typeof raw === "object" && !Array.isArray(raw)) {
-    for (const [name, answer] of Object.entries(raw as Record<string, unknown>)) {
+    for (const [name, answer] of Object.entries(raw)) {
       if (answer === null || typeof answer !== "object") {
         continue;
       }
+      // SAFETY: null and non-object answers were rejected; fields remain unknown.
       const record = answer as Record<string, unknown>;
       const kind = record.type;
       if (kind === "noul") {
@@ -553,6 +559,7 @@ export async function decide(options: DecideOptions): Promise<JevDecision> {
     );
   }
   const latencyMs = Math.round((performance.now() - started) * 100) / 100;
+  // SAFETY: systemOne returns the SDK response envelope; metadata is normalized below.
   const raw = (response ?? {}) as RawSystemOneResponse;
   const usage = raw.usage ?? null;
   return {
@@ -592,7 +599,7 @@ export function redactState(value: unknown, depth = 0): unknown {
   }
   if (typeof value === "object") {
     const redacted: Record<string, unknown> = {};
-    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    for (const [key, item] of Object.entries(value)) {
       redacted[key] = SECRET_KEY_PATTERN.test(key) ? "<redacted>" : redactState(item, depth + 1);
     }
     return redacted;
@@ -648,6 +655,7 @@ export function buildDecisionRecord(
       excerpt.length > JEV_LIMITS.maxExcerptChars
         ? excerpt.slice(0, JEV_LIMITS.maxExcerptChars)
         : excerpt,
+    // SAFETY: context is a record and redaction preserves object keys and shape.
     context: (redactState(options.context ?? {}) as Record<string, unknown>) ?? {},
     answers,
     input_tokens: decision.inputTokens,
@@ -714,6 +722,7 @@ async function pathExists(target: string): Promise<boolean> {
     await stat(target);
     return true;
   } catch (error) {
+    // SAFETY: only the optional code property is probed, never trusted as a string.
     if ((error as { code?: unknown }).code === "ENOENT") {
       return false;
     }

@@ -139,13 +139,11 @@ export function parseTriageMessages(text: string): NormalizedTriageMessage[] {
   }
   try {
     const parsed: unknown = JSON.parse(trimmed);
-    const entries = Array.isArray(parsed)
-      ? parsed
-      : parsed !== null &&
-          typeof parsed === "object" &&
-          Array.isArray((parsed as { messages?: unknown }).messages)
-        ? ((parsed as { messages: unknown[] }).messages as unknown[])
-        : [parsed];
+    const messages =
+      parsed !== null && typeof parsed === "object" && "messages" in parsed
+        ? parsed.messages
+        : undefined;
+    const entries = Array.isArray(parsed) ? parsed : Array.isArray(messages) ? messages : [parsed];
     if (entries.length === 0) {
       throw new Error("input contains no messages");
     }
@@ -207,12 +205,13 @@ function parseNumber(flag: string, value: string): number {
 }
 
 function parseSdkLogLevel(value: string): JevLogLevel {
-  if (!JEV_LOG_LEVELS.includes(value as JevLogLevel)) {
+  const level = JEV_LOG_LEVELS.find((candidate) => candidate === value);
+  if (level === undefined) {
     throw new Error(
       `--sdk-log-level expects one of ${JEV_LOG_LEVELS.join(", ")}, got ${JSON.stringify(value)}`,
     );
   }
-  return value as JevLogLevel;
+  return level;
 }
 
 function parseArgs(argv: readonly string[]): ParsedArgs {

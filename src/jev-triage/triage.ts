@@ -163,6 +163,7 @@ export function normalizeTriageMessage(input: unknown): NormalizedTriageMessage 
   if (input === null || typeof input !== "object" || Array.isArray(input)) {
     throw new Error("message must be a JSON object");
   }
+  // SAFETY: null, arrays, and non-objects were rejected; fields remain unknown.
   const record = input as Record<string, unknown>;
   const from = requireStringField(record, "from");
   const receivedAt = requireStringField(record, "received_at");
@@ -314,6 +315,7 @@ export function readTriageAnswers(decision: JevDecision): TriageAnswers {
   return {
     actionable: { probability: actionable.value },
     category: {
+      // SAFETY: Object.hasOwn(TRIAGE_CATEGORIES, label) was required above.
       label: label as keyof typeof TRIAGE_CATEGORIES,
       confidence: category.confidence ?? 0,
       probabilities: category.probabilities ?? {},
