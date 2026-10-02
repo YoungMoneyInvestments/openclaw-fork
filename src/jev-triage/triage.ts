@@ -102,9 +102,6 @@ export const TRIAGE_QUESTIONS: readonly JevQuestion[] = Object.freeze([
   ),
 ]);
 
-/** Question names in the order they are asked. */
-const TRIAGE_QUESTION_NAMES = ["actionable", "category", "priority"] as const;
-
 /** Raised when the `JEV_TRIAGE_DISABLED` kill switch is engaged. */
 export class JevTriageDisabled extends JevError {}
 
@@ -122,18 +119,6 @@ function assertTriageEnabled(env: NodeJS.ProcessEnv): void {
     );
   }
 }
-
-/** One inbound message, exactly as the CLI and callers supply it. */
-type TriageMessageInput = {
-  /** Sender identity, e.g. `"discord:1234"` or an email address. */
-  from: string;
-  subject: string;
-  body: string;
-  /** ISO-8601 timestamp; validated here (dates stay in code), never compared. */
-  received_at: string;
-  /** Optional stable id; logged in place of the raw message. */
-  id?: string;
-};
 
 /** A validated message with field caps applied. */
 export type NormalizedTriageMessage = {
