@@ -314,7 +314,7 @@ export const JEV_LOG_LEVELS: readonly JevLogLevel[] = ["off", "error", "warn", "
  * contract) and `debug` logs request bodies, i.e. message text. `off` cannot be
  * raised by the ambient environment.
  */
-export const JEV_SDK_LOG_LEVEL_DEFAULT: JevLogLevel = "off";
+const JEV_SDK_LOG_LEVEL_DEFAULT: JevLogLevel = "off";
 
 /**
  * SDK logger routed to stderr, so no SDK diagnostic can ever contaminate the
