@@ -17,6 +17,8 @@ function bundledPluginFile(pluginId: string, relativePath: string, suffix = ""):
 // Package scripts, workflows, Docker scenarios, and documented maintainer commands invoke these
 // files by path. They are executable roots rather than importable library modules.
 const repositoryScriptEntries = [
+  // package.json jev:triage invokes this standalone advisory CLI.
+  "src/jev-triage/cli.ts!",
   // apps/linux/README.md invokes this live Windows native-browser proof driver by path.
   "apps/linux/scripts/test-inline-browser.mjs!",
   "scripts/render-proof-video.mts!",
@@ -528,6 +530,11 @@ const config = {
     // Greeting cache/fact contracts (hash, alert text, store shapes) are
     // asserted by the focused greeting unit tests, not by another prod module.
     "src/system-agent/greeting.ts": ["exports", "types"],
+    // Advisory triage tests exercise parsing, validated transport, routing, and redaction seams.
+    // The separate all-exports pass verifies their actual test consumers.
+    "src/jev-triage/cli-run.ts": ["exports"],
+    "src/jev-triage/decision-layer.ts": ["exports", "types"],
+    "src/jev-triage/triage.ts": ["exports", "types"],
     // Focused tests consume these diagnostic/test seams; production code uses
     // the surrounding runtime helpers rather than importing the exports.
     "extensions/signal/src/setup-core.ts": ["exports"],
