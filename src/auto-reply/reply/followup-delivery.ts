@@ -187,6 +187,7 @@ export function resolveFollowupDeliveryDecision(params: {
         base: turn.queued,
         payloads,
         finalText: assistantFinalText,
+        hasExplicitSilentReply: hasDeliberateSilentTerminalReply(result),
         sourceReplyDeliveryMode: sourcePolicy.sourceReplyDeliveryMode,
         sendPolicyDenied: sourcePolicy.sendPolicyDenied,
         successfulSourceReplyDelivery: completedSourceDelivery,

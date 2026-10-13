@@ -39,6 +39,7 @@ export function resolveStrandedReplyRecovery(params: {
   successfulSourceReplyDelivery: boolean;
   isHeartbeat: boolean;
   isRoomEvent: boolean;
+  hasExplicitSilentReply?: boolean;
 }): StrandedReplyRecovery {
   // Host-owned payloads can still be awaiting transport when completion bookkeeping runs.
   if (
@@ -53,6 +54,9 @@ export function resolveStrandedReplyRecovery(params: {
   }
   const classification = classifyPrivateMessageToolFinal(params);
   if (params.base.strandedReplyRetry === true) {
+    if (params.hasExplicitSilentReply === true) {
+      return { kind: "none" };
+    }
     return {
       kind: "diagnostic",
       payload: buildStrandedReplyDeliveryFailurePayload(),

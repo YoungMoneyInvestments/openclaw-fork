@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { hasDeliberateSilentTerminalReply } from "../../agents/embedded-agent-runner/result-fallback-classifier.js";
 import type { SessionEntry } from "../../config/sessions.js";
 import { updateSessionEntry } from "../../config/sessions/session-accessor.js";
 import { enqueueSystemEvent } from "../../infra/system-events.js";
@@ -163,6 +164,7 @@ export async function completeReplyAgentRun(input: {
       base: followupRun,
       payloads: finalPayloads,
       finalText: assistantFinalText,
+      hasExplicitSilentReply: hasDeliberateSilentTerminalReply(runResult),
       sourceReplyDeliveryMode: sourceReplyPolicy.sourceReplyDeliveryMode,
       sendPolicyDenied: sourceReplyPolicy.sendPolicyDenied,
       successfulSourceReplyDelivery: completedSourceReplyDelivery,
