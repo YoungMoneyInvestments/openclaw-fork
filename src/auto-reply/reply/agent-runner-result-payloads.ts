@@ -221,12 +221,13 @@ export async function prepareReplyAgentPayloads(state: {
       runtimePolicySessionKey,
       opts,
     });
-    // The guard above limits this to a one-shot recovery turn. A second miss
-    // always gets a diagnostic, even when the retry produced no final text.
+    // Empty retries still diagnose missed sends; preserve explicit silence
+    // separately because normalization can remove its final text.
     const recovery = resolveStrandedReplyRecovery({
       base: followupRun,
       payloads: [],
       finalText: "",
+      hasExplicitSilentReply: deliberateSilentTerminalReply,
       sourceReplyDeliveryMode: sourceReplyPolicy.sourceReplyDeliveryMode,
       sendPolicyDenied: sourceReplyPolicy.sendPolicyDenied,
       successfulSourceReplyDelivery: completedSourceReplyDelivery,

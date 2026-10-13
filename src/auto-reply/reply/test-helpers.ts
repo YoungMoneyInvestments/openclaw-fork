@@ -1,6 +1,6 @@
 /** Shared test fixtures for reply queue and typing-controller tests. */
 import path from "node:path";
-import { onTestFinished, vi } from "vitest";
+import { onTestFinished, vi, type Mock } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import type { FollowupRun } from "./queue.js";
 import type { ReplyOperation } from "./reply-run-registry.js";
@@ -14,7 +14,13 @@ export function createMockReplyOperation(
     sessionId?: string;
     toolAuthorityFingerprint?: string;
   } = {},
-) {
+): {
+  replyOperation: ReplyOperation;
+  failMock: Mock;
+  freezeAbortMock: Mock;
+  retainFailureUntilCompleteMock: Mock;
+  updateSessionIdMock: Mock<(nextSessionId: string) => void>;
+} {
   const failMock = vi.fn();
   const freezeAbortMock = vi.fn();
   const retainFailureUntilCompleteMock = vi.fn();

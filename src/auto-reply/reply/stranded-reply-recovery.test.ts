@@ -168,6 +168,67 @@ describe("resolveStrandedReplyRecovery", () => {
     expect(recovery).toMatchObject({ kind: "diagnostic", warn: false });
   });
 
+  it.each(["NO_REPLY", "no_reply", " NO_REPLY\nNO_REPLY "])(
+    "keeps an explicitly silent retry private: %s",
+    (finalText) => {
+      expect(
+        resolveStrandedReplyRecovery({
+          base: createMockFollowupRun({ prompt: "question", strandedReplyRetry: true }),
+          payloads: [],
+          finalText,
+          hasExplicitSilentReply: true,
+          sourceReplyDeliveryMode: "message_tool_only",
+          sendPolicyDenied: false,
+          successfulSourceReplyDelivery: false,
+          isHeartbeat: false,
+          isRoomEvent: false,
+        }),
+      ).toEqual({ kind: "none" });
+    },
+  );
+
+  it.each([substantiveFinal, `${substantiveFinal} NO_REPLY`])(
+    "keeps failed substantive retry diagnostics: %s",
+    (finalText) => {
+      expect(
+        resolveStrandedReplyRecovery({
+          base: createMockFollowupRun({ prompt: "question", strandedReplyRetry: true }),
+          payloads: [],
+          finalText,
+          hasExplicitSilentReply: false,
+          sourceReplyDeliveryMode: "message_tool_only",
+          sendPolicyDenied: false,
+          successfulSourceReplyDelivery: false,
+          isHeartbeat: false,
+          isRoomEvent: false,
+        }),
+      ).toMatchObject({ kind: "diagnostic", warn: true });
+    },
+  );
+
+  it("preserves the pending tool media bypass independently of silent text", () => {
+    const payload = markReplyPayloadForSourceSuppressionDelivery({
+      mediaUrl: "https://example.test/audio.mp3",
+    });
+    const params = {
+      base: createMockFollowupRun({ prompt: "question", strandedReplyRetry: true }),
+      payloads: [payload],
+      finalText: substantiveFinal,
+      hasExplicitSilentReply: false,
+      sourceReplyDeliveryMode: "message_tool_only" as const,
+      sendPolicyDenied: false,
+      successfulSourceReplyDelivery: false,
+      isHeartbeat: false,
+      isRoomEvent: false,
+    };
+    expect(resolveStrandedReplyRecovery(params)).toEqual({ kind: "none" });
+    expect(resolveStrandedReplyRecovery({ ...params, payloads: [] })).toMatchObject({
+      kind: "diagnostic",
+      warn: true,
+    });
+    expect(params.payloads[0]?.mediaUrl).toBe("https://example.test/audio.mp3");
+  });
+
   it.each([
     { label: "room events", isRoomEvent: true },
     { label: "heartbeats", isHeartbeat: true },

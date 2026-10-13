@@ -4,6 +4,8 @@ import { createChatSendLateFollowupDisposition } from "../../gateway/server-meth
 import { getReplyPayloadMetadata, setReplyPayloadMetadata } from "../reply-payload.js";
 import type { ReplyPayload } from "../types.js";
 import type { AgentTurnExecutionResult } from "./agent-runner-execution.types.js";
+import { completeReplyAgentRun } from "./agent-runner-result-complete.js";
+import { prepareReplyAgentPayloads } from "./agent-runner-result-payloads.js";
 import { deliverFollowupDecision, resolveFollowupDeliveryDecision } from "./followup-delivery.js";
 import type { AdmittedFollowupTurn } from "./followup-turn-admission.js";
 import type { FollowupRun } from "./queue/types.js";
@@ -34,6 +36,14 @@ vi.mock("../../agents/runtime-plan/build.js", () => ({
 
 vi.mock("../../runtime.js", () => ({
   defaultRuntime: { error: (...args: unknown[]) => deliveryState.runtimeError(...args) },
+}));
+
+vi.mock("../../config/sessions/session-accessor.js", () => ({
+  updateSessionEntry: vi.fn(),
+}));
+
+vi.mock("./agent-runner-maintenance.js", () => ({
+  scheduleReplySessionMaintenance: vi.fn(),
 }));
 
 vi.mock("./route-reply.js", () => ({
@@ -495,6 +505,169 @@ describe("resolveFollowupDeliveryDecision", () => {
       payload: { isError: true, isStatusNotice: true },
     });
   });
+
+  it.each(["NO_REPLY", "no_reply", " NO_REPLY\nNO_REPLY ", '{"action":"NO_REPLY"}'])(
+    "keeps structured silent intent after visible text is normalized away: %s",
+    async (token) => {
+      const turn = createTurn();
+      turn.queued.strandedReplyRetry = true;
+      turn.queued.run.sourceReplyDeliveryMode = "message_tool_only";
+      const execution = createSettledExecution();
+      if (execution.outcome.kind !== "settled") {
+        throw new Error("expected settled fixture");
+      }
+      execution.outcome.result.meta.finalAssistantRawText = token;
+      const decision = resolveFollowupDeliveryDecision({
+        turn,
+        execution,
+        accounting: createAccounting(),
+      });
+      expect(decision).toMatchObject({ kind: "suppress" });
+      const onBlockReply = vi.fn(async () => {});
+      deliveryState.routeReply.mockClear();
+      await deliverFollowupDecision({
+        decision,
+        turn,
+        defaults: createDefaults(onBlockReply),
+        runId: turn.runId,
+        runFollowup: vi.fn(async () => {}),
+      });
+      expect(onBlockReply).not.toHaveBeenCalled();
+      expect(deliveryState.routeReply).not.toHaveBeenCalled();
+    },
+  );
+
+  it("keeps the canonical hook-blocked retry silent", () => {
+    const turn = createTurn();
+    turn.queued.strandedReplyRetry = true;
+    turn.queued.run.sourceReplyDeliveryMode = "message_tool_only";
+    const execution = createSettledExecution();
+    if (execution.outcome.kind !== "settled") {
+      throw new Error("expected settled fixture");
+    }
+    execution.outcome.result.meta.error = { kind: "hook_block", message: "blocked by hook" };
+    expect(
+      resolveFollowupDeliveryDecision({ turn, execution, accounting: createAccounting() }),
+    ).toMatchObject({ kind: "suppress" });
+  });
+
+  it("diagnoses substantive retry text with a trailing NO_REPLY through the real classifier", () => {
+    const turn = createTurn();
+    turn.queued.strandedReplyRetry = true;
+    turn.queued.run.sourceReplyDeliveryMode = "message_tool_only";
+    const text =
+      "This reply is substantive enough to look user-facing. It contains a second sentence for the private-final policy. NO_REPLY";
+    const execution = createSettledExecution(text);
+    if (execution.outcome.kind !== "settled") {
+      throw new Error("expected settled fixture");
+    }
+    execution.outcome.result.meta.finalAssistantRawText = text;
+    expect(
+      resolveFollowupDeliveryDecision({ turn, execution, accounting: createAccounting() }),
+    ).toMatchObject({ kind: "deliver-diagnostic", payload: { isError: true } });
+  });
+
+  it("keeps pending media deliverable beside structured silent text", () => {
+    const turn = createTurn();
+    turn.queued.strandedReplyRetry = true;
+    turn.queued.run.sourceReplyDeliveryMode = "message_tool_only";
+    const execution = createSettledExecution();
+    if (execution.outcome.kind !== "settled") {
+      throw new Error("expected settled fixture");
+    }
+    execution.outcome.result.meta.finalAssistantRawText = "NO_REPLY";
+    const mediaUrl = "https://example.test/audio.mp3";
+    expect(
+      resolveFollowupDeliveryDecision({
+        turn,
+        execution,
+        accounting: createAccounting([
+          setReplyPayloadMetadata({ mediaUrl }, { deliverDespiteSourceReplySuppression: true }),
+        ]),
+      }),
+    ).toMatchObject({ kind: "deliver", payloads: [{ mediaUrl }] });
+  });
+
+  it.each(["NO_REPLY", "no_reply", ""])(
+    "preserves explicit silence but diagnoses a truly empty reply preparation: %s",
+    async (rawText) => {
+      const turn = createTurn();
+      turn.queued.strandedReplyRetry = true;
+      turn.queued.run.allowEmptyAssistantReplyAsSilent = true;
+      const state = {
+        context: {
+          cfg: { messages: { groupChat: { visibleReplies: "message_tool" } } },
+          followupRun: turn.queued,
+          sessionCtx: { ChatType: "channel", Provider: "discord" },
+          sessionKey: "agent:main:discord:channel:C1",
+          storePath: "fixture-store",
+          activeSessionStore: {},
+          isHeartbeat: false,
+          execution: { status: "ok" },
+          returnWithQueuedFollowupDrain: (value: unknown) => value,
+        },
+        accounting: {
+          ...(createAccounting() as Record<string, unknown>),
+          runResult: { payloads: [], meta: { finalAssistantRawText: rawText } },
+          configuredFallbackModel: {},
+          fallbackTransition: {},
+          fallbackAttempts: [],
+          directlySentBlockKeys: new Set(),
+          directBlockDeliveries: [],
+        },
+      } as unknown as Parameters<typeof prepareReplyAgentPayloads>[0];
+      const result = await prepareReplyAgentPayloads(state);
+      expect(result.kind).toBe("return");
+      if (result.kind === "return") {
+        if (rawText) {
+          expect(result.value).toBeUndefined();
+        } else {
+          expect(result.value).toMatchObject({ isError: true, isStatusNotice: true });
+        }
+      }
+    },
+  );
+
+  it.each(["NO_REPLY", ""])(
+    "completion distinguishes explicit silence from a truly empty retry: %s",
+    async (rawText) => {
+      const turn = createTurn();
+      turn.queued.strandedReplyRetry = true;
+      const input = {
+        context: {
+          cfg: { messages: { groupChat: { visibleReplies: "message_tool" } } },
+          followupRun: turn.queued,
+          sessionCtx: { ChatType: "channel", Provider: "discord" },
+          sessionKey: "agent:main:discord:channel:C1",
+          storePath: "fixture-store",
+          activeSessionStore: {},
+          isHeartbeat: false,
+          resolvedVerboseLevel: "off",
+          returnWithQueuedFollowupDrain: (value: unknown) => value,
+        },
+        accounting: {
+          ...(createAccounting() as Record<string, unknown>),
+          runResult: {
+            payloads: [],
+            meta: { finalAssistantRawText: rawText, finalAssistantVisibleText: "" },
+          },
+          autoCompactionCount: 0,
+          verboseEnabled: false,
+        },
+        prepared: {
+          kind: "continue",
+          guardedReplyPayloads: [],
+          completedSourceReplyDelivery: false,
+        },
+      } as unknown as Parameters<typeof completeReplyAgentRun>[0];
+      const result = await completeReplyAgentRun(input);
+      if (rawText) {
+        expect(result).toEqual([]);
+      } else {
+        expect(result).toMatchObject({ isError: true, isStatusNotice: true });
+      }
+    },
+  );
 
   it("keeps terminal failure fallback silent for internal follow-ups", () => {
     const turn = createTurn();
